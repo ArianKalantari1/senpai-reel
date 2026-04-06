@@ -1,5 +1,8 @@
 """
-Tests for analysis/embeddings.py — mocked OpenAI embeddings API.
+Tests for analysis/embeddings.py — Phase 10: Voyage provider.
+
+All outbound calls are mocked via the _get_provider() helper so no real
+API credentials are required during testing.
 """
 import uuid
 import pytest
@@ -8,16 +11,13 @@ from unittest.mock import patch, MagicMock
 from datetime import datetime
 
 
-def _openai_embed_response(texts):
-    """Build a minimal OpenAI embeddings response."""
-    dim = 1536
-    return {
-        "data": [
-            {"embedding": [0.1] * dim, "index": i}
-            for i in range(len(texts))
-        ],
-        "usage": {"prompt_tokens": len(texts) * 5, "total_tokens": len(texts) * 5},
-    }
+def _mock_voyage_provider(dim=512):
+    """Return a drop-in mock for VoyageProvider."""
+    provider = MagicMock()
+    provider.dimensions = dim
+    provider.embed.side_effect = lambda text: [0.1] * dim
+    provider.embed_batch.side_effect = lambda texts: [[0.1] * dim for _ in texts]
+    return provider
 
 
 # ── embed_batch ───────────────────────────────────────────────────────────────
@@ -25,87 +25,42 @@ def _openai_embed_response(texts):
 class TestEmbedBatch:
     def test_empty_list_returns_empty(self):
         from analysis.embeddings import embed_batch
-        result = embed_batch([], "api_key")
+        with patch("analysis.embeddings._get_provider", return_value=_mock_voyage_provider()):
+            result = embed_batch([])
         assert result == []
 
-    def test_single_text_returns_vector(self):
+    def test_single_text_returns_512_dim_vector(self):
         from analysis.embeddings import embed_batch
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_embed_response(["hello"])
-
-        with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            result = embed_batch(["hello"], "fake_key")
-
+        with patch("analysis.embeddings._get_provider", return_value=_mock_voyage_provider()):
+            result = embed_batch(["hello"])
         assert len(result) == 1
-        assert len(result[0]) == 1536
+        assert len(result[0]) == 512
 
     def test_multiple_texts_returns_multiple_vectors(self):
         from analysis.embeddings import embed_batch
-
         texts = ["text one", "text two", "text three"]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_embed_response(texts)
-
-        with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            result = embed_batch(texts, "fake_key")
-
+        with patch("analysis.embeddings._get_provider", return_value=_mock_voyage_provider()):
+            result = embed_batch(texts)
         assert len(result) == 3
 
-    def test_401_raises_permission_error(self):
+    def test_provider_error_propagates(self):
         from analysis.embeddings import embed_batch
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.raise_for_status.return_value = None
-
-        with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            with pytest.raises(PermissionError):
-                embed_batch(["text"], "bad_key")
-
-    def test_large_batch_split_into_sub_batches(self):
-        """If texts > _BATCH_SIZE (50), should make multiple API calls."""
-        from analysis.embeddings import embed_batch, _BATCH_SIZE
-
-        texts = [f"text {i}" for i in range(_BATCH_SIZE + 5)]
-
-        call_count = [0]
-        def side_effect(*args, **kwargs):
-            call_count[0] += 1
-            batch = kwargs["json"]["input"]
-            mock_r = MagicMock()
-            mock_r.status_code = 200
-            mock_r.raise_for_status.return_value = None
-            mock_r.json.return_value = _openai_embed_response(batch)
-            return mock_r
-
-        with patch("analysis.embeddings.requests.post", side_effect=side_effect):
-            result = embed_batch(texts, "key")
-
-        assert call_count[0] == 2  # ceil((50+5) / 50) = 2 calls
-        assert len(result) == len(texts)
+        provider = _mock_voyage_provider()
+        provider.embed_batch.side_effect = RuntimeError("API down")
+        with patch("analysis.embeddings._get_provider", return_value=provider):
+            with pytest.raises(RuntimeError):
+                embed_batch(["text"])
 
 
 # ── embed_text ────────────────────────────────────────────────────────────────
 
 class TestEmbedText:
-    def test_returns_single_vector(self):
+    def test_returns_single_512_dim_vector(self):
         from analysis.embeddings import embed_text
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_embed_response(["test"])
-
-        with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            vec = embed_text("test", "key")
-
+        with patch("analysis.embeddings._get_provider", return_value=_mock_voyage_provider()):
+            vec = embed_text("test")
         assert isinstance(vec, list)
-        assert len(vec) == 1536
+        assert len(vec) == 512
 
 
 # ── embed_pending_units ───────────────────────────────────────────────────────
@@ -123,7 +78,8 @@ def embed_db(tmp_path):
 class TestEmbedPendingUnits:
     def test_no_pending_returns_zeros(self, embed_db):
         from analysis.embeddings import embed_pending_units
-        result = embed_pending_units("key")
+        with patch("analysis.embeddings._get_provider", return_value=_mock_voyage_provider()):
+            result = embed_pending_units()
         assert result["done"] == 0
         assert result["total"] == 0
 
@@ -136,23 +92,18 @@ class TestEmbedPendingUnits:
             conn.execute("""
                 INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
                     confidence, extracted_at, model)
-                VALUES (?, ?, ?, ?, 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
+                VALUES (?, ?, ?, ?, 'Resume', 'tip', 0.9, ?, 'llama-3.3-70b')
             """, (str(uuid.uuid4()), f"post_{i}", f"text {i}", f"claim {i}", now))
         conn.close()
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_embed_response(["a", "b", "c"])
-
-        with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            result = embed_pending_units("key", batch_size=10)
+        with patch("analysis.embeddings._get_provider", return_value=_mock_voyage_provider()):
+            result = embed_pending_units(batch_size=10)
 
         assert result["total"] == 3
         assert result["done"] == 3
         assert result["failed"] == 0
 
-    def test_api_failure_returns_failed_count(self, embed_db):
+    def test_provider_failure_returns_failed_count(self, embed_db):
         from analysis.embeddings import embed_pending_units
 
         conn = duckdb.connect(embed_db.DB_PATH)
@@ -160,16 +111,15 @@ class TestEmbedPendingUnits:
         conn.execute("""
             INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
                 confidence, extracted_at, model)
-            VALUES (?, 'post_err', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
+            VALUES (?, 'post_err', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'llama-3.3-70b')
         """, (str(uuid.uuid4()), now))
         conn.close()
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.raise_for_status.return_value = None
+        provider = _mock_voyage_provider()
+        provider.embed_batch.side_effect = RuntimeError("API error")
 
-        with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            result = embed_pending_units("bad_key")
+        with patch("analysis.embeddings._get_provider", return_value=provider):
+            result = embed_pending_units()
 
         assert result["failed"] == 1
         assert result["done"] == 0
@@ -182,17 +132,13 @@ class TestEmbedPendingUnits:
         conn.execute("""
             INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
                 confidence, extracted_at, model)
-            VALUES (?, 'post_cb', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
+            VALUES (?, 'post_cb', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'llama-3.3-70b')
         """, (str(uuid.uuid4()), now))
         conn.close()
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_embed_response(["a"])
-
         calls = []
-        with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            embed_pending_units("key", progress_callback=lambda *a: calls.append(a))
+        with patch("analysis.embeddings._get_provider", return_value=_mock_voyage_provider()):
+            embed_pending_units(progress_callback=lambda *a: calls.append(a))
 
         assert len(calls) == 1
+

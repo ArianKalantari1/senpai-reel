@@ -1,5 +1,8 @@
 """
-Tests for analysis/content_gen.py — mocked GPT + prompt rendering.
+Tests for analysis/content_gen.py — Phase 10: Groq-backed generation.
+
+_call_gpt now delegates to providers.factory.get_generation_llm().generate().
+All tests mock at the provider factory level so no real API keys are required.
 """
 import json
 import uuid
@@ -8,7 +11,11 @@ from unittest.mock import patch, MagicMock
 from datetime import datetime
 
 
-# ── format_reference_context ─────────────────────────────────────────────────
+def _mock_generation_llm(text="Generated text", tokens=150, cost=0.0001):
+    """Return a mock get_generation_llm() result."""
+    mock_llm = MagicMock()
+    mock_llm.generate.return_value = (text, tokens, cost)
+    return mock_llm
 
 class TestFormatReferenceContext:
     def test_empty_list_returns_string(self):
@@ -79,53 +86,36 @@ class TestPromptTemplates:
 
 # ── _call_gpt ─────────────────────────────────────────────────────────────────
 
-def _openai_response(content="Generated text", in_tokens=100, out_tokens=50):
-    return {
-        "choices": [{"message": {"content": content}}],
-        "usage": {"prompt_tokens": in_tokens, "completion_tokens": out_tokens},
-    }
-
-
 class TestCallGpt:
     def test_returns_text_tokens_cost(self):
         from analysis.content_gen import _call_gpt
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_response("Hello from GPT")
+        with patch("providers.factory.get_generation_llm", return_value=_mock_generation_llm("Hello from Groq", 150, 0.0001)):
+            text, tokens, cost = _call_gpt("sys", "user")
 
-        with patch("analysis.content_gen.requests.post", return_value=mock_resp):
-            text, tokens, cost = _call_gpt("sys", "user", "api_key")
-
-        assert text == "Hello from GPT"
+        assert text == "Hello from Groq"
         assert tokens == 150
         assert cost > 0
 
-    def test_401_raises_permission_error(self):
+    def test_provider_error_propagates(self):
         from analysis.content_gen import _call_gpt
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 401
-        mock_resp.raise_for_status.return_value = None
+        mock_llm = MagicMock()
+        mock_llm.generate.side_effect = RuntimeError("rate limit")
 
-        with patch("analysis.content_gen.requests.post", return_value=mock_resp):
-            with pytest.raises(PermissionError):
-                _call_gpt("sys", "user", "bad_key")
+        with patch("providers.factory.get_generation_llm", return_value=mock_llm):
+            with pytest.raises(RuntimeError):
+                _call_gpt("sys", "user")
 
-    def test_cost_scales_with_tokens(self):
-        from analysis.content_gen import _call_gpt, _MINI_INPUT_COST, _MINI_OUTPUT_COST
+    def test_different_max_tokens_passed_through(self):
+        from analysis.content_gen import _call_gpt
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_response(in_tokens=1_000_000, out_tokens=1_000_000)
+        mock_llm = _mock_generation_llm("OK", 50, 0.0)
 
-        with patch("analysis.content_gen.requests.post", return_value=mock_resp):
-            _, _, cost = _call_gpt("s", "u", "k")
+        with patch("providers.factory.get_generation_llm", return_value=mock_llm):
+            _call_gpt("s", "u", max_tokens=800)
 
-        expected = 1_000_000 * _MINI_INPUT_COST + 1_000_000 * _MINI_OUTPUT_COST
-        assert cost == pytest.approx(expected, rel=0.01)
+        mock_llm.generate.assert_called_once_with("s", "u", max_tokens=800)
 
 
 # ── generate_caption ──────────────────────────────────────────────────────────
@@ -144,12 +134,7 @@ class TestGenerateCaption:
     def test_returns_generated_content(self, gen_db):
         from analysis.content_gen import generate_caption, GeneratedContent
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_response("Great caption here #jobs")
-
-        with patch("analysis.content_gen.requests.post", return_value=mock_resp):
+        with patch("analysis.content_gen._call_gpt", return_value=("Great caption here #jobs", 150, 0.0001)):
             result = generate_caption(
                 topic="Resume",
                 angle="common mistakes",
@@ -167,13 +152,8 @@ class TestGenerateCaption:
     def test_saved_to_db(self, gen_db):
         import duckdb
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_response("Caption saved")
-
         from analysis.content_gen import generate_caption
-        with patch("analysis.content_gen.requests.post", return_value=mock_resp):
+        with patch("analysis.content_gen._call_gpt", return_value=("Caption saved", 100, 0.0)):
             result = generate_caption("LinkedIn", "profile tips", "casual", [], "k")
 
         conn = duckdb.connect(gen_db.DB_PATH)
@@ -191,12 +171,7 @@ class TestGenerateHooks:
     def test_returns_hooks_content_type(self, gen_db):
         from analysis.content_gen import generate_hooks
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_response("1. Hook one\n2. Hook two")
-
-        with patch("analysis.content_gen.requests.post", return_value=mock_resp):
+        with patch("analysis.content_gen._call_gpt", return_value=("1. Hook one\n2. Hook two", 80, 0.0)):
             result = generate_hooks(
                 topic="Interview",
                 angle="before you walk in",
@@ -215,12 +190,7 @@ class TestGenerateScript:
     def test_returns_script_content_type(self, gen_db):
         from analysis.content_gen import generate_script
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.raise_for_status.return_value = None
-        mock_resp.json.return_value = _openai_response("HOOK: Did you know...\nSETUP: ...")
-
-        with patch("analysis.content_gen.requests.post", return_value=mock_resp):
+        with patch("analysis.content_gen._call_gpt", return_value=("HOOK: Did you know...\nSETUP: ...", 200, 0.0)):
             result = generate_script(
                 topic="Salary",
                 tone="confident",

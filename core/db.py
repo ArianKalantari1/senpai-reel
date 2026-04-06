@@ -174,6 +174,7 @@ def init_db():
     """)
 
     # Phase 4 — Message units (knowledge extraction)
+    # Phase 10 note: embedding column is FLOAT[512] (Voyage voyage-3-lite)
     conn.execute("""
     CREATE TABLE IF NOT EXISTS message_units (
         unit_id      TEXT PRIMARY KEY,
@@ -189,7 +190,7 @@ def init_db():
         source_end   DOUBLE,
         extracted_at TIMESTAMP,
         model        TEXT,
-        embedding    FLOAT[1536],
+        embedding    FLOAT[512],
         embedded_at  TIMESTAMP
     )
     """)
@@ -224,11 +225,28 @@ def init_db():
     for col, typedef in [
         ("downloaded_at", "TIMESTAMP"),
         ("file_size_mb", "DOUBLE"),
+        # Phase 10 — OCR text from video frames
+        ("ocr_text", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE posts ADD COLUMN {col} {typedef}")
         except Exception:
             pass  # column already exists
+
+    # Phase 10 — Migrate embedding column from FLOAT[1536] to FLOAT[512]
+    # DuckDB does not support ALTER COLUMN type, so we drop and re-add.
+    # This clears existing embeddings; they must be re-embedded after migration.
+    try:
+        col_info = conn.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'message_units' AND column_name = 'embedding'"
+        ).fetchone()
+        if col_info and "1536" in str(col_info[0]):
+            conn.execute("ALTER TABLE message_units DROP COLUMN embedding")
+            conn.execute("ALTER TABLE message_units ADD COLUMN embedding FLOAT[512]")
+            conn.execute("UPDATE message_units SET embedded_at = NULL")
+    except Exception:
+        pass  # table may not exist yet or already migrated
 
     # Phase 9 — Indexes for query performance
     for ddl in [
@@ -488,7 +506,7 @@ def upsert_post(account_id: str, item: dict) -> bool:
     else:
         conn.execute("""
             INSERT INTO posts VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         """, (
             post_id,
@@ -515,6 +533,7 @@ def upsert_post(account_id: str, item: dict) -> bool:
             None,    # downloaded_at
             None,    # file_size_mb
             json.dumps(item),
+            None,    # ocr_text (Phase 10)
         ))
 
     conn.close()

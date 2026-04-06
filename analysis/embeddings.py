@@ -1,8 +1,11 @@
 """
-Phase 5 — OpenAI text embeddings.
+Phase 5 / Phase 10 — Text embeddings.
 
-Uses text-embedding-3-small (1536 dims, ~$0.02/1M tokens — essentially free).
-Stores FLOAT[1536] in message_units.embedding.
+Phase 10: swapped from OpenAI text-embedding-3-small (1536-dim) to
+Voyage voyage-3-lite (512-dim) via providers.VoyageProvider.
+
+Legacy `api_key` parameter is accepted for backwards compatibility but
+ignored — VoyageProvider reads its key from providers.factory.
 """
 
 from __future__ import annotations
@@ -10,53 +13,32 @@ from __future__ import annotations
 import logging
 from typing import List
 
-import requests
-
 from core.db import get_connection
 
 logger = logging.getLogger(__name__)
 
-_EMBED_COST_PER_TOKEN = 0.02 / 1_000_000
-_MODEL = "text-embedding-3-small"
-_BATCH_SIZE = 50
+
+def _get_provider():
+    from providers.factory import get_embeddings
+    return get_embeddings()
 
 
-def embed_text(text: str, api_key: str) -> List[float]:
-    """Embed a single text string, returns 1536-dim float list."""
-    return embed_batch([text], api_key)[0]
+def embed_text(text: str, api_key: str = "") -> List[float]:
+    """Embed a single text string. Returns 512-dim float list (Phase 10)."""
+    return _get_provider().embed(text)
 
 
-def embed_batch(texts: List[str], api_key: str) -> List[List[float]]:
+def embed_batch(texts: List[str], api_key: str = "") -> List[List[float]]:
     """
-    Batch-embed up to _BATCH_SIZE texts in a single API call.
-    Automatically splits larger lists into sub-batches.
+    Batch-embed texts via Voyage voyage-3-lite.
+    Returns a list of 512-dim float vectors.
     """
-    if not texts:
-        return []
-
-    all_embeddings: List[List[float]] = []
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
-    for i in range(0, len(texts), _BATCH_SIZE):
-        batch = texts[i : i + _BATCH_SIZE]
-        resp = requests.post(
-            "https://api.openai.com/v1/embeddings",
-            headers=headers,
-            json={"model": _MODEL, "input": batch},
-            timeout=60,
-        )
-        if resp.status_code == 401:
-            raise PermissionError("Invalid OpenAI API key")
-        resp.raise_for_status()
-        data = resp.json()
-        all_embeddings.extend([d["embedding"] for d in data["data"]])
-
-    return all_embeddings
+    return _get_provider().embed_batch(texts)
 
 
 def embed_pending_units(
-    api_key: str,
-    batch_size: int = 50,
+    api_key: str = "",
+    batch_size: int = 128,
     progress_callback=None,
 ) -> dict:
     """
@@ -84,7 +66,7 @@ def embed_pending_units(
     total = len(rows)
 
     try:
-        embeddings = embed_batch(texts, api_key)
+        embeddings = embed_batch(texts)
     except Exception as e:
         logger.error("Batch embedding failed: %s", e)
         return {"done": 0, "failed": total, "total": total, "error": str(e)}

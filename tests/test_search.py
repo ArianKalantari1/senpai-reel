@@ -24,7 +24,7 @@ def search_db(tmp_path):
     db_mod.DB_PATH = str(tmp_path / "search_test.duckdb")
     db_mod.init_db()
 
-    dim = 1536
+    dim = 512
     vec_a = [1.0] + [0.0] * (dim - 1)
     vec_b = [0.0, 1.0] + [0.0] * (dim - 2)
 
@@ -55,14 +55,14 @@ def search_db(tmp_path):
             (unit_id, post_id, text, claim, topic, content_type, confidence,
              extracted_at, model, embedding, embedded_at)
         VALUES (?, 'post_a', 'Resume keyword tips', 'Keywords matter', 'Resume', 'tip',
-                0.9, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
+                0.9, ?, 'gpt-4o-mini', ?::FLOAT[512], ?)
     """, (uid_a, now, vec_a, now))
     conn.execute("""
         INSERT INTO message_units
             (unit_id, post_id, text, claim, topic, content_type, confidence,
              extracted_at, model, embedding, embedded_at)
         VALUES (?, 'post_b', 'Interview STAR method', 'Structure your answers', 'Interview', 'tip',
-                0.85, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
+                0.85, ?, 'gpt-4o-mini', ?::FLOAT[512], ?)
     """, (uid_b, now, vec_b, now))
 
     conn.close()
@@ -118,11 +118,11 @@ class TestSemanticSearch:
         """
         from analysis.search import semantic_search
 
-        dim = 1536
+        dim = 512
         query_vec = [1.0] + [0.0] * (dim - 1)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("resume tips", "fake_key", top_k=10)
+            results = semantic_search("resume tips", top_k=10)
 
         assert len(results) >= 2
         # First result should be unit A (identical vector → cosine = 1.0)
@@ -132,33 +132,33 @@ class TestSemanticSearch:
     def test_topic_filter_excludes_other_topics(self, search_db):
         from analysis.search import semantic_search
 
-        dim = 1536
+        dim = 512
         query_vec = [1.0] + [0.0] * (dim - 1)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("anything", "fake_key", topic_filter="Interview", top_k=10)
+            results = semantic_search("anything", topic_filter="Interview", top_k=10)
 
         assert all(r.topic == "Interview" for r in results)
 
     def test_content_type_filter_works(self, search_db):
         from analysis.search import semantic_search
 
-        dim = 1536
-        query_vec = [0.5] + [0.5] + [0.0] * (1534)
+        dim = 512
+        query_vec = [0.5] + [0.5] + [0.0] * (510)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("test", "k", content_type_filter="tip", top_k=10)
+            results = semantic_search("test", content_type_filter="tip", top_k=10)
 
         assert all(r.content_type == "tip" for r in results)
 
     def test_returns_search_result_objects(self, search_db):
         from analysis.search import semantic_search, SearchResult
 
-        dim = 1536
+        dim = 512
         query_vec = [1.0] + [0.0] * (dim - 1)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("test", "k", top_k=5)
+            results = semantic_search("test", top_k=5)
 
         for r in results:
             assert isinstance(r, SearchResult)
@@ -172,9 +172,9 @@ class TestSemanticSearch:
         db_mod.DB_PATH = str(tmp_path / "empty.duckdb")
         db_mod.init_db()
 
-        dim = 1536
+        dim = 512
         with patch("analysis.search.embed_text", return_value=[0.0] * dim):
-            results = semantic_search("anything", "key", top_k=5)
+            results = semantic_search("anything", top_k=5)
 
         assert results == []
         db_mod.DB_PATH = old_path

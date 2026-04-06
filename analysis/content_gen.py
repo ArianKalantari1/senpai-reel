@@ -1,8 +1,9 @@
 """
-Phase 7 — Content generation via GPT-4o.
+Phase 7 / Phase 10 — Content generation.
 
-Uses extracted message units as grounding context for all generated content.
-All outputs are saved to the generated_content table with cost tracking.
+Phase 10: swapped from GPT-4o-mini (OpenAI) to Groq LLaMA 3.3 70B.
+`openai_api_key` parameter is still accepted but ignored — Groq reads its
+key from providers.factory.get_generation_llm().
 """
 
 from __future__ import annotations
@@ -12,8 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
-import requests
-
 from core.db import get_connection
 from analysis.prompts import (
     CAPTION_SYSTEM, CAPTION_USER,
@@ -22,13 +21,7 @@ from analysis.prompts import (
     format_reference_context,
 )
 
-_GPT4O_INPUT_COST = 2.50 / 1_000_000   # $2.50 / 1M input tokens
-_GPT4O_OUTPUT_COST = 10.00 / 1_000_000  # $10.00 / 1M output tokens
-
-# Use gpt-4o-mini for lower cost; generation quality is still excellent here
-_MODEL = "gpt-4o-mini"
-_MINI_INPUT_COST = 0.15 / 1_000_000
-_MINI_OUTPUT_COST = 0.60 / 1_000_000
+_MODEL = "llama-3.3-70b-versatile"   # Groq model name
 
 
 @dataclass
@@ -46,41 +39,20 @@ class GeneratedContent:
 def _call_gpt(
     system: str,
     user: str,
-    api_key: str,
+    api_key: str = "",
     model: str = _MODEL,
     stream: bool = False,
     max_tokens: int = 1000,
 ) -> tuple[str, int, float]:
     """
-    Call GPT and return (output_text, tokens_used, cost_usd).
+    Generate text via Groq LLaMA 3.3 70B.
+    `api_key` is ignored — key is read from providers.factory.
+    Returns (output_text, tokens_used, cost_usd).
     """
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.7,
-        "max_tokens": max_tokens,
-    }
-    resp = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
-    if resp.status_code == 401:
-        raise PermissionError("Invalid OpenAI API key")
-    resp.raise_for_status()
-
-    data = resp.json()
-    usage = data["usage"]
-    in_tokens = usage.get("prompt_tokens", 0)
-    out_tokens = usage.get("completion_tokens", 0)
-    cost = in_tokens * _MINI_INPUT_COST + out_tokens * _MINI_OUTPUT_COST
-    text = data["choices"][0]["message"]["content"].strip()
-    return text, in_tokens + out_tokens, round(cost, 6)
+    from providers.factory import get_generation_llm
+    gen_llm = get_generation_llm()
+    text, tokens, cost = gen_llm.generate(system, user, max_tokens=max_tokens)
+    return text, tokens, cost
 
 
 def generate_caption(

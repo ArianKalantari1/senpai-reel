@@ -1,8 +1,11 @@
 """
-Phase 5 — Semantic search over message units.
+Phase 5 / Phase 10 — Semantic search over message units.
 
 Uses DuckDB's list_cosine_similarity() for vector search —
 no external vector DB required.
+
+Phase 10: embedding dimension changed from 1536 (OpenAI) to 512 (Voyage).
+`openai_api_key` is accepted for backwards compatibility but ignored.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ class SearchResult:
 
 def semantic_search(
     query: str,
-    openai_api_key: str,
+    openai_api_key: str = "",
     topic_filter: Optional[str] = None,
     content_type_filter: Optional[str] = None,
     top_k: int = 20,
@@ -40,15 +43,15 @@ def semantic_search(
 
     Args:
         query:                Natural language search query
-        openai_api_key:       For embedding the query
-        topic_filter:         Optional topic to restrict search (from taxonomy.TOPICS)
+        openai_api_key:       Ignored (Phase 10 — Voyage reads key from factory)
+        topic_filter:         Optional topic to restrict search
         content_type_filter:  Optional content_type to restrict search
         top_k:                Number of results to return
 
     Returns:
         List of SearchResult sorted by cosine similarity descending
     """
-    query_vec = embed_text(query, openai_api_key)
+    query_vec = embed_text(query)
 
     conn = get_connection()
     try:
@@ -81,7 +84,7 @@ def semantic_search(
                 mu.content_type,
                 mu.text,
                 mu.claim,
-                list_cosine_similarity(mu.embedding, ?::FLOAT[1536]) AS score,
+                list_cosine_similarity(mu.embedding, ?::FLOAT[512]) AS score,
                 p.video_url,
                 CAST(p.posted_at AS TEXT) AS posted_at
             FROM message_units mu

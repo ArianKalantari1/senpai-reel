@@ -79,11 +79,17 @@ class MessageUnit:
 def extract_message_units(
     transcript_text: str,
     post_id: str,
-    openai_api_key: str,
+    openai_api_key: str = "",
     model: str = "gpt-4o-mini",
+    provider=None,
 ) -> tuple[List[MessageUnit], float]:
     """
-    Extract message units from a transcript via GPT.
+    Extract message units from a transcript.
+
+    Phase 10: when `provider` is passed (e.g. CerebrasProvider), delegates to it
+    directly. When `openai_api_key` is empty and no provider given, resolves the
+    configured provider from providers.factory.  Falls back to legacy OpenAI path
+    only when an explicit key is supplied.
 
     Returns:
         (units, cost_usd)
@@ -91,6 +97,15 @@ def extract_message_units(
     if not transcript_text or len(transcript_text.strip()) < 30:
         return [], 0.0
 
+    # --- Phase 10: use injected or factory provider ---
+    if provider is not None:
+        return provider.extract(transcript_text, post_id)
+
+    if not openai_api_key:
+        from providers.factory import get_llm
+        return get_llm().extract(transcript_text, post_id)
+
+    # --- Legacy: OpenAI direct HTTP call ---
     headers = {
         "Authorization": f"Bearer {openai_api_key}",
         "Content-Type": "application/json",

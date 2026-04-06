@@ -4,6 +4,10 @@ Phase 3 — Transcription queue.
 Processes all posts that have audio but no transcript yet.
 Designed to be run incrementally — persists after each transcription
 so partial runs don't lose work.
+
+Phase 10 update: when provider == 'assemblyai', delegates to the streaming
+pipeline (pipeline.stream_runner) for concurrent, overlapping STT → extract →
+embed execution.  Legacy 'deepgram' / 'whisper' paths remain unchanged.
 """
 
 import logging
@@ -45,8 +49,9 @@ def run_transcription_queue(
     Transcribe posts with audio but no transcript yet.
 
     Args:
-        api_key:           API key (Deepgram or OpenAI depending on provider)
-        provider:          'deepgram' or 'whisper'
+        api_key:           API key — AssemblyAI key when provider='assemblyai',
+                           Deepgram key when provider='deepgram', ignored for 'whisper'
+        provider:          'assemblyai' | 'deepgram' | 'whisper'
         batch_size:        Max posts to process per run
         progress_callback: Optional callable(done, total, post_id, error)
 
@@ -69,6 +74,33 @@ def run_transcription_queue(
     conn.close()
 
     total = len(rows)
+
+    # --- Phase 10: AssemblyAI path — streaming pipeline ---
+    if provider == "assemblyai":
+        from providers.stt import AssemblyAIProvider
+        from providers.factory import get_llm, get_embeddings
+        from pipeline.stream_runner import run_stream_pipeline
+
+        stt = AssemblyAIProvider(api_key=api_key)
+        llm = get_llm()
+        emb = get_embeddings()
+
+        stats = run_stream_pipeline(
+            post_rows=rows,
+            stt_provider=stt,
+            llm_provider=llm,
+            embed_provider=emb,
+            progress_callback=progress_callback,
+        )
+        return {
+            "done": stats.stt_done,
+            "failed": stats.stt_failed,
+            "total": total,
+            "total_cost_usd": round(stats.total_cost_usd, 4),
+            "errors": stats.errors,
+        }
+
+    # --- Legacy path: Deepgram / Whisper ---
     done = failed = 0
     total_cost = 0.0
     errors = []
