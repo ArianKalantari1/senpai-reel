@@ -116,7 +116,8 @@ def get_ocr() -> Optional[object]:
         return None
     if provider == "gemini":
         from providers.ocr import GeminiOCRProvider
-        _ocr = GeminiOCRProvider(api_key=_secret("GEMINI_API_KEY"))
+        # secrets.toml uses GOOGLE_API_KEY (Google AI Studio key)
+        _ocr = GeminiOCRProvider(api_key=_secret("GOOGLE_API_KEY") or _secret("GEMINI_API_KEY"))
     else:
         return None
     return _ocr

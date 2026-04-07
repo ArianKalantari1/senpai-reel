@@ -265,9 +265,30 @@ def init_db():
     conn.close()
 
 
-def get_connection():
-    """Return a new DuckDB connection. Caller is responsible for closing it."""
-    return duckdb.connect(DB_PATH)
+def get_connection(read_only: bool = False, retries: int = 5, retry_delay: float = 1.0):
+    """
+    Return a new DuckDB connection.
+
+    Args:
+        read_only:   Open in read-only mode (allows concurrent readers alongside a writer).
+        retries:     Number of times to retry on lock conflict before raising.
+        retry_delay: Seconds to wait between retries.
+
+    Caller is responsible for closing it.
+    """
+    import time as _time
+    last_err = None
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(DB_PATH, read_only=read_only)
+        except Exception as e:
+            if "lock" in str(e).lower() or "IO Error" in str(e):
+                last_err = e
+                if attempt < retries - 1:
+                    _time.sleep(retry_delay)
+            else:
+                raise
+    raise last_err
 
 
 # --------------------------------------------------------
@@ -505,8 +526,24 @@ def upsert_post(account_id: str, item: dict) -> bool:
               now, item.get("videoUrl"), item.get("audioUrl"), post_id))
     else:
         conn.execute("""
-            INSERT INTO posts VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            INSERT INTO posts (
+                post_id, account_id, caption, caption_clean,
+                hashtags, mentions, likes, views,
+                comments_count, duration_sec, posted_at, scraped_at,
+                video_url, audio_url, thumbnail_url,
+                is_pinned, is_sponsored, engagement_rate,
+                local_video_path, local_audio_path,
+                download_status, downloaded_at, file_size_mb,
+                raw_json, ocr_text
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?,
+                ?, ?, ?,
+                ?, ?
             )
         """, (
             post_id,

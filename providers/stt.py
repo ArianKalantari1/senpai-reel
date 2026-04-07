@@ -37,9 +37,12 @@ class AssemblyAIProvider:
         self._aai = aai
 
     def transcribe(self, audio_path: str, post_id: str) -> TranscriptResult:
-        path = Path(audio_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        # Accept either a local file path or a remote URL (AssemblyAI handles both)
+        is_url = audio_path.startswith("http://") or audio_path.startswith("https://")
+        if not is_url:
+            path = Path(audio_path)
+            if not path.exists():
+                raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         config = self._aai.TranscriptionConfig(
             language_code="en",
@@ -48,7 +51,8 @@ class AssemblyAIProvider:
             word_boost=["ATS", "resume", "LinkedIn", "STAR", "KPI"],  # domain hints
         )
         transcriber = self._aai.Transcriber(config=config)
-        transcript = transcriber.transcribe(str(path))
+        audio_source = audio_path if is_url else str(path)
+        transcript = transcriber.transcribe(audio_source)
 
         if transcript.status == self._aai.TranscriptStatus.error:
             raise RuntimeError(f"AssemblyAI error for {post_id}: {transcript.error}")

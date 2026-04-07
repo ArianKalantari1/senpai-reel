@@ -11,7 +11,7 @@ assemblyai>=0.30.0          # STT: AssemblyAI Universal-2 (100 hr/month free)
 cerebras-cloud-sdk>=1.0.0   # LLM extraction: LLaMA 3.3 70B @ 2100 tok/sec
 voyageai>=0.3.0              # Embeddings: voyage-3-lite 512-dim (200M tokens free)
 groq>=0.13.0                 # Generation: LLaMA 3.3 70B (14,400 req/day free)
-google-generativeai>=0.8.0   # OCR: Gemini Flash 2.0 (1,500 req/day free)
+google-genai>=0.8.0          # OCR: Gemini Flash 2.0 (1,500 req/day free)
 plotly==6.5.0
 
 # Testing

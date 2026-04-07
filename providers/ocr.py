@@ -34,15 +34,15 @@ class GeminiOCRProvider:
     Free tier: 1,500 req/day  (enough for 300 reels at 5 frames each)
     Signup:    aistudio.google.com (Google account)
 
-    Install: pip install google-generativeai
+    Install: pip install google-genai
     """
 
     def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
         if not api_key:
             raise ValueError("GEMINI_API_KEY is required")
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        self._model = genai.GenerativeModel(model)
+        from google import genai
+        self._client = genai.Client(api_key=api_key)
+        self._model = model
 
     def extract(self, image_path: str, post_id: str = "") -> str:
         """
@@ -66,10 +66,17 @@ class GeminiOCRProvider:
         suffix = path.suffix.lower()
         mime_type = "image/jpeg" if suffix in (".jpg", ".jpeg") else "image/png"
 
-        response = self._model.generate_content([
-            _OCR_PROMPT,
-            {"mime_type": mime_type, "data": image_data},
-        ])
+        from google.genai import types as genai_types
+        response = self._client.models.generate_content(
+            model=self._model,
+            contents=[
+                _OCR_PROMPT,
+                genai_types.Part.from_bytes(
+                    data=base64.b64decode(image_data),
+                    mime_type=mime_type,
+                ),
+            ],
+        )
 
         text = response.text.strip() if response.text else ""
         return text
