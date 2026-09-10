@@ -78,6 +78,21 @@ def run_transcription_queue(
     Returns:
         dict: done, failed, skipped, total_cost_usd
     """
+    if not api_key:
+        key_name = "DEEPGRAM_API_KEY" if provider == "deepgram" else "OPENAI_API_KEY"
+        return {
+            "done": 0,
+            "failed": 0,
+            "total": 0,
+            "total_cost_usd": 0.0,
+            "errors": [
+                {
+                    "post_id": None,
+                    "error": f"Transcription is not configured. Add `{key_name}` in Settings.",
+                }
+            ],
+        }
+
     conn = get_connection()
     rows = conn.execute(
         """

@@ -2,14 +2,25 @@ import streamlit as st
 import pandas as pd
 
 from core.client_context import render_client_selector
+from core.config import get_secret, missing_secret_message
 from core.db import get_connection, init_db
+from core.navigation import render_page_link
+from core.pipeline import get_pipeline_lock
 
 st.set_page_config(page_title="Corpus Explorer", page_icon="📝", layout="wide")
-st.title("📝 Corpus Explorer")
+st.title("Corpus Explorer")
 init_db()
 active_client = render_client_selector()
 client_id = active_client["client_id"]
 st.caption(f"Search transcripts for {active_client['name']}, view full text, track transcription cost")
+pipeline_lock = get_pipeline_lock()
+pipeline_busy = pipeline_lock is not None
+
+if pipeline_busy:
+    st.warning(
+        f"Pipeline busy. Current stage: {pipeline_lock.get('stage') or 'Starting'}. "
+        "Transcription actions are paused until it finishes."
+    )
 
 
 def get_transcription_stats():
@@ -76,17 +87,14 @@ with st.expander("⚙️ Run Transcription Queue"):
     batch = st.number_input("Batch size", min_value=1, max_value=50, value=10)
 
     api_key_field = "DEEPGRAM_API_KEY" if prov == "deepgram" else "OPENAI_API_KEY"
-    try:
-        api_key = st.secrets[api_key_field]
-        key_ok = bool(api_key)
-    except Exception:
-        api_key = ""
-        key_ok = False
+    api_key = get_secret(api_key_field, st)
+    key_ok = bool(api_key)
 
     if not key_ok:
-        st.warning(f"⚠️ `{api_key_field}` not found in `.streamlit/secrets.toml`")
+        st.warning(missing_secret_message(api_key_field, "Transcription"))
+        render_page_link(st, "Settings.py", "Open Settings")
     else:
-        if st.button(f"▶️ Transcribe {batch} posts via {prov}", type="primary"):
+        if st.button(f"▶️ Transcribe {batch} posts via {prov}", type="primary", disabled=pipeline_busy):
             from processing.transcription_queue import run_transcription_queue
 
             prog = st.progress(0)
@@ -116,14 +124,12 @@ st.markdown("---")
 with st.expander("🎙️ Transcribe a single post"):
     pid = st.text_input("Post ID", placeholder="e.g., ABC123")
     prov_single = st.radio("Provider", ["deepgram", "whisper"], key="single_prov", horizontal=True)
-    if st.button("▶️ Transcribe", key="btn_single_tx"):
+    if st.button("▶️ Transcribe", key="btn_single_tx", disabled=pipeline_busy):
         key_field = "DEEPGRAM_API_KEY" if prov_single == "deepgram" else "OPENAI_API_KEY"
-        try:
-            key = st.secrets[key_field]
-        except Exception:
-            key = ""
+        key = get_secret(key_field, st)
         if not key:
-            st.error(f"`{key_field}` not set in secrets.")
+            st.error(missing_secret_message(key_field, "Transcription"))
+            render_page_link(st, "Settings.py", "Open Settings")
         elif not pid.strip():
             st.error("Enter a post ID.")
         else:
@@ -185,7 +191,8 @@ finally:
         pass
 
 if df.empty:
-    st.info("No transcripts yet. Run a scrape, download videos, extract audio, then transcribe.")
+    st.info("No transcripts yet. Run stage 3 on the Pipeline page after scraping, downloading, and extracting audio.")
+    render_page_link(st, "Pipeline.py", "Open Pipeline")
 else:
     st.caption(f"{len(df)} transcripts")
     # Truncate for table display

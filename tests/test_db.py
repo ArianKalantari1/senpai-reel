@@ -27,6 +27,7 @@ class TestInitDb:
         "profiles", "raw_scrapes", "reels", "comments", "tagged_users",
         "creator_accounts", "posts", "scrape_jobs", "transcripts",
         "transcript_words", "message_units", "generated_content",
+        "pipeline_locks",
     }
 
     def test_all_tables_created(self, tmp_db):

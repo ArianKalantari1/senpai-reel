@@ -9,7 +9,10 @@ st.set_page_config(
 
 from core.client_context import render_client_selector
 from core.clients import add_client_account, get_accounts_with_limits
+from core.config import get_secret, missing_secret_message
 from core.db import init_db, get_connection, get_posts_stats, get_scrape_history
+from core.navigation import render_page_link
+from core.pipeline import get_pending_download_expiry, get_pipeline_lock
 from collection.scraper import scrape_and_store
 from collection.account_list import DEFAULT_MAX_ITEMS
 from processing.download import download_pending_posts
@@ -19,10 +22,22 @@ init_db()
 active_client = render_client_selector()
 client_id = active_client["client_id"]
 
-APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
+APIFY_TOKEN = get_secret("APIFY_TOKEN", st)
+pipeline_lock = get_pipeline_lock()
+pipeline_busy = pipeline_lock is not None
 
-st.title("🎥 Senpai Reel — Scraper")
+st.title("Senpai Reel")
 st.caption(f"Scrape competitor Instagram reels for {active_client['name']}.")
+
+if not APIFY_TOKEN:
+    st.error(missing_secret_message("APIFY_TOKEN", "Scraping"))
+    render_page_link(st, "Settings.py", "Open Settings")
+
+if pipeline_busy:
+    st.warning(
+        f"Pipeline busy. Current stage: {pipeline_lock.get('stage') or 'Starting'}. "
+        "Manual write actions are paused until it finishes."
+    )
 
 # ── Global stats bar ──────────────────────────────────────────────────────────
 stats = get_posts_stats(client_id)
@@ -47,7 +62,7 @@ with tab_single:
         max_items = st.number_input("Max reels", min_value=1, max_value=200, value=30,
                                      key="single_max")
 
-    if st.button("🚀 Scrape Account", type="primary", key="btn_single"):
+    if st.button("🚀 Scrape Account", type="primary", key="btn_single", disabled=pipeline_busy or not APIFY_TOKEN):
         if not username.strip():
             st.error("Please enter a username.")
         else:
@@ -79,7 +94,7 @@ with tab_batch:
     batch_max = st.number_input("Max reels per account", min_value=1, max_value=200,
                                  value=DEFAULT_MAX_ITEMS, key="batch_max")
 
-    if st.button("🚀 Start Batch Scrape", type="primary", key="btn_batch"):
+    if st.button("🚀 Start Batch Scrape", type="primary", key="btn_batch", disabled=pipeline_busy or not APIFY_TOKEN):
         handles = [h.strip().lstrip("@") for h in handles_input.splitlines() if h.strip()]
         if not handles:
             st.error("No accounts entered.")
@@ -158,11 +173,18 @@ with tab_download:
     dq2.metric("✅ Downloaded", done_count)
     dq3.metric("❌ Failed", failed_count)
 
+    expiry = get_pending_download_expiry(client_id)
+    if expiry["warning_count"]:
+        st.warning(
+            f"{expiry['warning_count']} pending downloads are approaching Apify CDN expiry. "
+            f"Oldest pending media URL: about {expiry['oldest_age_hours']:.1f} hours old."
+        )
+
     batch_dl_size = st.number_input("Batch size", min_value=1, max_value=100, value=20,
                                      help="Number of videos to download in one run",
                                      key="dl_batch_size")
 
-    if st.button("⬇️ Start Download Batch", type="primary", key="btn_download"):
+    if st.button("⬇️ Start Download Batch", type="primary", key="btn_download", disabled=pipeline_busy):
         if pending_count == 0:
             st.info("No pending downloads.")
         else:

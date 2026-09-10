@@ -172,7 +172,37 @@ For every message unit without an embedding, calls OpenAI `text-embedding-3-smal
 
 ---
 
-### Stage 5 — Usage (what the 5 visible pages do)
+### Stage 5 — Usage (visible pages)
+
+#### Pipeline (`pages/Pipeline.py`)
+
+Client-scoped pipeline dashboard with one-click operation:
+
+| Stage | Trigger |
+|-------|---------|
+| Scrape | Scrape configured competitor accounts |
+| Download | Download pending Apify media URLs |
+| Audio | Extract WAV audio from downloaded MP4s |
+| Transcribe | Run the Deepgram queue |
+| Extract units | Run knowledge extraction |
+| Embed | Run semantic embeddings |
+
+The **Run Everything Pending** button chains those stages in dependency order. It uses a DuckDB-backed `pipeline_locks` row so only one write-heavy pipeline run can operate at a time, and it shows a clear busy state on other write pages.
+
+The page also warns when pending downloads are approaching Apify CDN expiry. URLs older than roughly 18 hours are flagged because media links commonly expire within 24–48 hours.
+
+#### Onboarding (`pages/Onboarding.py`)
+
+Guided first-run path:
+
+1. Name the client and niche.
+2. Add competitor Instagram accounts.
+3. Open the Pipeline page.
+4. Open Content Studio after extraction.
+
+#### Settings (`pages/Settings.py`)
+
+Shows whether `APIFY_TOKEN`, `DEEPGRAM_API_KEY`, and `OPENAI_API_KEY` are configured. Users can paste keys for the current Streamlit session. Session keys are not persisted; permanent setup still uses `.streamlit/secrets.toml` or environment variables.
 
 #### Home / Scraper (`app.py`)
 
@@ -182,15 +212,15 @@ The operational control centre. Three tabs:
 |-----|-------------|
 | **Single Account** | Scrape one Instagram handle on demand (10–60 sec) |
 | **Batch Scrape** | Edit the 23-account list and scrape all at once |
-| **📥 Download Queue** | Download pending videos + shows pending/done/failed counts |
+| **Download Queue** | Download pending videos + shows pending/done/failed counts |
 
 Also shows a scrape history expander (last 20 jobs with status, timestamps, counts).
 
-The `APIFY_TOKEN` is loaded from `.streamlit/secrets.toml` — **if this is missing, the entire home page breaks**.
+If `APIFY_TOKEN` is missing, the page shows a plain configuration message and links to Settings. The page no longer breaks during first run.
 
 ---
 
-#### Page 1 — Data Viewer (`pages/1_📊_Data_Viewer.py`)
+#### Data Viewer (`pages/Data_Viewer.py`)
 
 Paginated table (50 rows/page) of all posts in the DB. 
 
@@ -204,18 +234,18 @@ Falls back to `raw_scrapes` table if `posts` is empty (useful in early stages).
 
 ---
 
-#### Page 3 — Corpus Explorer (`pages/3_📝_Corpus_Explorer.py`)
+#### Corpus Explorer (`pages/Corpus_Explorer.py`)
 
 Browse and search transcripts.
 
 Top stats: how many posts are transcribed / pending / cost so far.  
-**Trigger transcription queue** — hidden in an expandable section ("⚙️ Run Transcription Queue"). Requires `DEEPGRAM_API_KEY` in secrets.  
+**Trigger transcription queue** — available in an expandable section. Requires `DEEPGRAM_API_KEY`; if it is missing, the page says transcription is not configured and links to Settings.
 Search bar: filter transcripts by keyword.  
 Result list: clicking a row shows the full transcript text + word timestamps.
 
 ---
 
-#### Page 4 — Search (`pages/4_🔍_Search.py`)
+#### Search (`pages/Search.py`)
 
 Semantic and keyword search over all extracted message units.
 
@@ -228,30 +258,30 @@ Filters: topic (dropdown), content type (dropdown), result count.
 Results shown as cards: score, topic badge, content type badge, text, claim, creator username, link to source video.
 
 **Also hides pipeline controls here:**  
-- "Run Extraction Queue" expander (requires `OPENAI_API_KEY`)  
+- "Run Extraction Queue" expander (requires `OPENAI_API_KEY`)
 - "Run Embedding Pipeline" trigger in sidebar
 
 ---
 
-#### Page 5 — Analytics (`pages/5_📊_Analytics.py`)
+#### Analytics (`pages/Analytics.py`)
 
 5-tab competitor intelligence dashboard (requires data in `message_units`):
 
 | Tab | Shows |
 |-----|-------|
-| 🏆 Leaderboard | Bar chart: creator accounts ranked by post count + total engagement |
-| 🏷️ Topic Distribution | Pie + bar chart: which topics are covered most across all reels |
-| 🗺️ Content Gap Map | Heatmap pivot: creator × topic, showing who covers what (and what nobody covers) |
-| 🔥 Top Reels | Table of highest-engagement posts, filterable by topic, with video URL links |
-| #️⃣ Hashtags | Bar chart of most-used hashtags across all posts |
+| Leaderboard | Bar chart: creator accounts ranked by post count + total engagement |
+| Topic Distribution | Pie + bar chart: which topics are covered most across all reels |
+| Content Gap Map | Heatmap pivot: creator × topic, showing who covers what (and what nobody covers) |
+| Top Reels | Table of highest-engagement posts, filterable by topic, with video URL links |
+| Hashtags | Bar chart of most-used hashtags across all posts |
 
 Requires `plotly` for charts — degrades gracefully to text tables if unavailable.
 
 ---
 
-#### Page 6 — Content Studio (`pages/6_✍️_Content_Studio.py`)
+#### Content Studio (`pages/Content_Studio.py`)
 
-AI-powered content generation. **Requires `OPENAI_API_KEY`.**  
+AI-powered content generation. **Requires `OPENAI_API_KEY` for new output.** Without it, the page explains what is unavailable and still shows generation history.
 
 Controls: Topic (dropdown), Tone (professional/friendly/bold/educational), Angle (free text).  
 Reference units: search for relevant competitor insights to ground the generation (optional but strongly recommended — improves output quality).  
@@ -268,10 +298,13 @@ All outputs are saved to the `generated_content` table automatically.
 
 ---
 
-## Database schema (14 tables)
+## Database schema (16 core tables)
 
 | Table | Stage | What it holds |
 |-------|-------|---------------|
+| `clients` | 0 | Client profile, niche, notes, brand voice, and target audience |
+| `client_accounts` | 0 | Competitor Instagram handles per client |
+| `client_posts` | 0 | Client-to-post visibility links |
 | `raw_scrapes` | 1 | Raw JSON blobs as returned by Apify |
 | `profiles` | 1 | Legacy: one row per scrape run summary |
 | `creator_accounts` | 1 | One row per Instagram account (bio, followers, etc.) |
@@ -280,12 +313,11 @@ All outputs are saved to the `generated_content` table automatically.
 | `reels` | 1 | Legacy structured reels (kept for old pages compatibility) |
 | `comments` | 1 | Reel comments (recursive, supports replies) |
 | `tagged_users` | 1 | Users tagged in reels |
-| `reel_features` | — | Legacy, unused by current pipeline |
-| `video_analysis` | — | Legacy, from old AI analysis pages |
 | `transcripts` | 3 | One row per transcribed post (text, confidence, cost) |
 | `transcript_words` | 3 | One row per word with start/end timestamps |
 | `message_units` | 4 | One row per extracted knowledge unit (text, topic, type, embedding) |
 | `generated_content` | 5 | All AI-generated captions/hooks/scripts with cost tracking |
+| `pipeline_locks` | Ops | Single-row lock for write-heavy pipeline runs |
 
 **Storage location:** `reels.duckdb` (single file in project root, no server needed)  
 **WAL file:** `reels.duckdb.wal` — this grows over time. DuckDB checkpoints it automatically, but if it gets large (>100 MB), run `CHECKPOINT;` from a DuckDB shell.
@@ -300,37 +332,29 @@ DEEPGRAM_API_KEY = "..."               # Required for Stage 3 transcription
 OPENAI_API_KEY = "sk-..."             # Required for Stages 4, 4b, and Content Studio
 ```
 
+Keys can also be pasted on the Settings page for the current Streamlit session.
+
 If any key is missing:
-- No `APIFY_TOKEN` → Home page shows an error, nothing can be scraped
-- No `DEEPGRAM_API_KEY` → Corpus Explorer transcription queue silently does nothing
-- No `OPENAI_API_KEY` → Search falls back to keyword mode, Content Studio page shows an error and stops
+- No `APIFY_TOKEN` → Scrape buttons explain that scraping needs Apify and link to Settings.
+- No `DEEPGRAM_API_KEY` → Transcription says it is not configured and links to Settings.
+- No `OPENAI_API_KEY` → Search falls back to keyword mode; extraction, embeddings, and generation explain what needs OpenAI.
 
 ---
 
-## Current user journey (honest assessment)
+## Current user journey
 
-### What a user actually has to do today:
+### Recommended path:
 
 ```
-1. Open app → Home (Scraper)
-2. Type an account name or click "Batch Scrape" → wait 10–60 sec per account
-3. Go to Home → "📥 Download Queue" tab → click "Start Download Batch" → wait
-4. Go to Corpus Explorer → expand "⚙️ Run Transcription Queue" → enter Deepgram key → click run → wait
-5. Go to Search → expand "Run Extraction Queue" → click run → wait (GPT processes each transcript)
-6. Go to Search → sidebar → click "Embed pending units" → wait
-7. NOW the app is useful:
-   - Search page: semantic search over competitor knowledge
-   - Analytics page: competitor dashboards
-   - Content Studio: generate captions/hooks/scripts
+1. Open Onboarding.
+2. Name the client and add competitor accounts.
+3. Open Pipeline and click Run Everything Pending.
+4. Use Search, Analytics, or Content Studio.
 ```
 
-### What makes this hard for new users:
+The older per-stage controls remain on Home, Corpus Explorer, and Search while the chained pipeline proves itself.
 
-1. **No guided onboarding** — first-time users see empty tables and have no instructions
-2. **Pipeline controls are scattered** — steps 3, 4, 5, 6 are hidden in expanders on different pages
-3. **No pipeline status on the home page** — you can't see at a glance "you've done steps 1–2, still need to do steps 3–4"
-4. **No "run full pipeline" button** — each stage must be triggered manually on a different page
-5. **Error messages require technical knowledge** — a missing API key shows a Python exception, not plain English guidance
+Empty states on each page point back to the Pipeline stage that fills the missing data.
 
 ---
 
@@ -338,28 +362,7 @@ If any key is missing:
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
-| Apify CDN URLs expire in ~24–48h | Medium | Download videos promptly after scraping |
-| DuckDB lock conflict | Medium | Only one process can write at a time. If Streamlit is running, you can't run CLI scripts simultaneously without closing the app first |
+| Apify CDN URLs expire in ~24–48h | Medium | Pipeline and Download Queue warn when pending media URLs are getting old |
+| DuckDB lock conflict | Medium | Pipeline runs use `pipeline_locks`; write pages show a busy state while a run is active |
 | `use_container_width` warnings | Low | Fixed in latest commit — cosmetic only |
-| `OPENAI_API_KEY` missing → Content Studio hard stops | Medium | Page calls `st.stop()` — user sees error at top of page |
-| Audio extraction (ffmpeg) not auto-triggered after download | Medium | User must manually run audio extraction before transcription. There is no UI button for this — it's called internally but only from `extract_audio_for_downloaded_posts()` which has no Streamlit trigger |
-| No progress indication for multi-hour batch jobs | Low | Long batch scrapes or transcription runs have no ETA shown |
 | WAL file growth | Low | `reels.duckdb.wal` will grow with each write session. No auto-checkpoint UI. |
-
----
-
-## Recommended next steps (for tomorrow's planning)
-
-### Quick wins (1–2 hours each)
-- [ ] Add an "Extract Audio" button to the Download Queue tab (Stage 2b currently has no UI trigger)
-- [ ] Move all pipeline trigger buttons to the home page as a step-by-step checklist with live status counts
-- [ ] Add a "What to do next" banner that detects your pipeline stage automatically
-
-### Medium effort (half day each)
-- [ ] Replace scattered pipeline controls with a single **Pipeline Dashboard** page showing all 5 stages with status + one-click triggers
-- [ ] Add proper empty-state messages on every page ("No data yet — go to Home and scrape some accounts first")
-
-### Larger refactor (1–2 days)
-- [ ] Rename pages to user-facing names (remove numbered prefixes)
-- [ ] Auto-run audio extraction immediately after download completes (no separate step)
-- [ ] Add a cost dashboard showing total Apify + Deepgram + OpenAI spend to date
