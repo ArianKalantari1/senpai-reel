@@ -15,6 +15,10 @@ from typing import List, Optional
 import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
+from analysis.originality import (
+    ReferenceLeakError,
+    find_overlap,
+)
 from analysis.prompts import (
     CAPTION_SYSTEM, CAPTION_USER,
     HOOKS_SYSTEM, HOOKS_USER,
@@ -105,6 +109,44 @@ def _call_gpt(
     return text, in_tokens + out_tokens, round(cost, 6)
 
 
+def _call_gpt_original(
+    system: str,
+    user: str,
+    api_key: str,
+    reference_units: list,
+    max_tokens: int = 1000,
+) -> tuple[str, int, float]:
+    """Call GPT and reject output that reuses competitor wording.
+
+    One retry with the offending phrases named explicitly, then fail closed.
+    Returning leaked copy silently is worse than returning an error: the
+    client publishes it under their own name and nobody finds out.
+
+    See creative-director-ai #17.
+    """
+    text, tokens, cost = _call_gpt(system, user, api_key, max_tokens=max_tokens)
+    overlap = find_overlap(text, reference_units)
+    if not overlap:
+        return text, tokens, cost
+
+    banned = "\n".join(f"- {p}" for p in overlap[:10])
+    retry_user = (
+        f"{user}\n\n"
+        "Your previous attempt reused wording from the reference material. "
+        "Rewrite it completely. These exact phrases must not appear:\n"
+        f"{banned}"
+    )
+    text2, tokens2, cost2 = _call_gpt(system, retry_user, api_key, max_tokens=max_tokens)
+
+    total_tokens = tokens + tokens2
+    total_cost = round(cost + cost2, 6)
+
+    overlap2 = find_overlap(text2, reference_units)
+    if overlap2:
+        raise ReferenceLeakError(overlap2)
+    return text2, total_tokens, total_cost
+
+
 def generate_caption(
     topic: str,
     angle: str,
@@ -117,7 +159,9 @@ def generate_caption(
     context = format_reference_context(reference_units)
     user_msg = CAPTION_USER.format(topic=topic, tone=tone, angle=angle, reference_context=context)
     user_msg = _with_client_context(user_msg, client_context)
-    text, tokens, cost = _call_gpt(CAPTION_SYSTEM, user_msg, openai_api_key, max_tokens=600)
+    text, tokens, cost = _call_gpt_original(
+        CAPTION_SYSTEM, user_msg, openai_api_key, reference_units, max_tokens=600
+    )
 
     result = GeneratedContent(
         gen_id=str(uuid.uuid4()),
@@ -147,7 +191,9 @@ def generate_hooks(
     context = format_reference_context(reference_units)
     user_msg = HOOKS_USER.format(topic=topic, angle=angle, reference_context=context, count=count)
     user_msg = _with_client_context(user_msg, client_context)
-    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=400)
+    text, tokens, cost = _call_gpt_original(
+        system, user_msg, openai_api_key, reference_units, max_tokens=400
+    )
 
     result = GeneratedContent(
         gen_id=str(uuid.uuid4()),
@@ -180,7 +226,9 @@ def generate_script(
         topic=topic, duration_sec=duration_sec, tone=tone, reference_context=context
     )
     user_msg = _with_client_context(user_msg, client_context)
-    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=800)
+    text, tokens, cost = _call_gpt_original(
+        system, user_msg, openai_api_key, reference_units, max_tokens=800
+    )
 
     result = GeneratedContent(
         gen_id=str(uuid.uuid4()),
