@@ -9,21 +9,45 @@ so partial runs don't lose work.
 import logging
 from typing import Callable, Optional
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 from processing.transcribe import transcribe_post
 
 logger = logging.getLogger(__name__)
 
 
-def get_transcription_stats() -> dict:
+def get_transcription_stats(client_id: str = DEFAULT_CLIENT_ID) -> dict:
     """Return counts useful for UI progress display."""
     conn = get_connection()
     try:
         total_with_audio = conn.execute(
-            "SELECT COUNT(*) FROM posts WHERE local_audio_path IS NOT NULL AND local_audio_path != ''"
+            """
+            SELECT COUNT(*)
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            WHERE cp.client_id = ?
+              AND p.local_audio_path IS NOT NULL
+              AND p.local_audio_path != ''
+            """,
+            [client_id],
         ).fetchone()[0]
-        transcribed = conn.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0]
-        total_cost = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM transcripts").fetchone()[0]
+        transcribed = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM transcripts t
+            JOIN client_posts cp ON t.post_id = cp.post_id
+            WHERE cp.client_id = ?
+            """,
+            [client_id],
+        ).fetchone()[0]
+        total_cost = conn.execute(
+            """
+            SELECT COALESCE(SUM(t.cost_usd), 0)
+            FROM transcripts t
+            JOIN client_posts cp ON t.post_id = cp.post_id
+            WHERE cp.client_id = ?
+            """,
+            [client_id],
+        ).fetchone()[0]
         pending = total_with_audio - transcribed
         return {
             "total_with_audio": total_with_audio,
@@ -40,6 +64,7 @@ def run_transcription_queue(
     provider: str = "deepgram",
     batch_size: int = 10,
     progress_callback: Optional[Callable] = None,
+    client_id: str = DEFAULT_CLIENT_ID,
 ) -> dict:
     """
     Transcribe posts with audio but no transcript yet.
@@ -58,13 +83,15 @@ def run_transcription_queue(
         """
         SELECT p.post_id, p.local_audio_path
         FROM posts p
+        JOIN client_posts cp ON p.post_id = cp.post_id
         LEFT JOIN transcripts t ON p.post_id = t.post_id
-        WHERE p.local_audio_path IS NOT NULL
+        WHERE cp.client_id = ?
+          AND p.local_audio_path IS NOT NULL
           AND p.local_audio_path != ''
           AND t.post_id IS NULL
         LIMIT ?
         """,
-        [batch_size],
+        [client_id, batch_size],
     ).fetchall()
     conn.close()
 
@@ -75,7 +102,7 @@ def run_transcription_queue(
 
     for i, (post_id, audio_path) in enumerate(rows):
         try:
-            result = transcribe_post(post_id, api_key, provider)
+            result = transcribe_post(post_id, api_key, provider, client_id)
             done += 1
             total_cost += result.cost_usd
             if progress_callback:

@@ -3,16 +3,173 @@ import json
 import uuid
 import re
 from datetime import datetime
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 DB_PATH = "reels.duckdb"
+
+DEFAULT_CLIENT_ID = "jobs_au_demo"
+DEFAULT_CLIENT_NAME = "Jobs AU (demo)"
+DEFAULT_CLIENT_NICHE = "Jobs in Australia"
+
+
+def _column_exists(conn, table: str, column: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM information_schema.columns
+        WHERE table_name = ? AND column_name = ?
+        """,
+        [table, column],
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def _add_column_if_missing(conn, table: str, column: str, typedef: str):
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+
+
+def _seed_demo_client(conn):
+    now = datetime.utcnow()
+    conn.execute(
+        """
+        INSERT INTO clients (
+            client_id, name, niche, created_at, notes,
+            brand_voice_notes, target_audience
+        )
+        SELECT ?, ?, ?, ?, ?, ?, ?
+        WHERE NOT EXISTS (SELECT 1 FROM clients WHERE client_id = ?)
+        """,
+        [
+            DEFAULT_CLIENT_ID,
+            DEFAULT_CLIENT_NAME,
+            DEFAULT_CLIENT_NICHE,
+            now,
+            "Seed client for the original Jobs-in-Australia competitor corpus.",
+            "Helpful, direct, evidence-backed career advice.",
+            "Job seekers and career switchers in Australia.",
+            DEFAULT_CLIENT_ID,
+        ],
+    )
+
+    try:
+        from collection.account_list import JOBS_AU_SEED_ACCOUNTS, PRIORITY_ACCOUNTS
+    except Exception:
+        JOBS_AU_SEED_ACCOUNTS = []
+        PRIORITY_ACCOUNTS = {}
+
+    for handle in JOBS_AU_SEED_ACCOUNTS:
+        conn.execute(
+            """
+            INSERT INTO client_accounts (
+                client_id, instagram_handle, category, added_at, max_items
+            )
+            SELECT ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM client_accounts
+                WHERE client_id = ? AND instagram_handle = ?
+            )
+            """,
+            [
+                DEFAULT_CLIENT_ID,
+                handle,
+                "Jobs/Recruitment",
+                now,
+                PRIORITY_ACCOUNTS.get(handle, 30),
+                DEFAULT_CLIENT_ID,
+                handle,
+            ],
+        )
+
+
+def _backfill_client_id(conn, tables: Iterable[str]):
+    for table in tables:
+        _add_column_if_missing(conn, table, "client_id", "TEXT")
+        conn.execute(
+            f"UPDATE {table} SET client_id = ? WHERE client_id IS NULL",
+            [DEFAULT_CLIENT_ID],
+        )
+
+
+def _backfill_client_post_links(conn):
+    conn.execute(
+        """
+        INSERT INTO client_posts (client_id, post_id, added_at)
+        SELECT DISTINCT
+            COALESCE(p.client_id, ?),
+            p.post_id,
+            COALESCE(p.scraped_at, CURRENT_TIMESTAMP)
+        FROM posts p
+        WHERE p.post_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM client_posts cp
+              WHERE cp.client_id = COALESCE(p.client_id, ?)
+                AND cp.post_id = p.post_id
+          )
+        """,
+        [DEFAULT_CLIENT_ID, DEFAULT_CLIENT_ID],
+    )
+
+    conn.execute(
+        """
+        INSERT INTO client_accounts (client_id, instagram_handle, category, added_at, max_items)
+        SELECT DISTINCT
+            COALESCE(p.client_id, ?),
+            ca.username,
+            COALESCE(ca.category, 'Competitor'),
+            CURRENT_TIMESTAMP,
+            30
+        FROM posts p
+        JOIN creator_accounts ca ON p.account_id = ca.account_id
+        WHERE ca.username IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM client_accounts cacc
+              WHERE cacc.client_id = COALESCE(p.client_id, ?)
+                AND cacc.instagram_handle = ca.username
+          )
+        """,
+        [DEFAULT_CLIENT_ID, DEFAULT_CLIENT_ID],
+    )
 
 def init_db():
     conn = duckdb.connect(DB_PATH)
 
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS clients (
+        client_id         TEXT PRIMARY KEY,
+        name              TEXT NOT NULL,
+        niche             TEXT,
+        created_at        TIMESTAMP,
+        notes             TEXT,
+        brand_voice_notes TEXT,
+        target_audience   TEXT
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS client_accounts (
+        client_id        TEXT,
+        instagram_handle TEXT,
+        category         TEXT,
+        added_at         TIMESTAMP,
+        max_items        INTEGER DEFAULT 30,
+        PRIMARY KEY (client_id, instagram_handle)
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS client_posts (
+        client_id TEXT,
+        post_id   TEXT,
+        added_at  TIMESTAMP,
+        PRIMARY KEY (client_id, post_id)
+    )
+    """)
+
     # Profile summary
     conn.execute("""
     CREATE TABLE IF NOT EXISTS profiles (
+        client_id TEXT,
         profile TEXT,
         scraped_at TIMESTAMP,
         total_reels INTEGER
@@ -22,6 +179,7 @@ def init_db():
     # Raw scrapes (NEW)
     conn.execute("""
     CREATE TABLE IF NOT EXISTS raw_scrapes (
+        client_id TEXT,
         id INTEGER,
         profile TEXT,
         raw JSON,
@@ -33,6 +191,7 @@ def init_db():
     conn.execute("""
     CREATE TABLE IF NOT EXISTS reels (
         reel_id TEXT PRIMARY KEY,
+        client_id TEXT,
         profile TEXT,
         shortcode TEXT,
         caption TEXT,
@@ -61,6 +220,7 @@ def init_db():
     # Comments
     conn.execute("""
     CREATE TABLE IF NOT EXISTS comments (
+        client_id TEXT,
         reel_id TEXT,
         comment_id TEXT,
         parent_id TEXT,
@@ -74,6 +234,7 @@ def init_db():
     # Tagged users
     conn.execute("""
     CREATE TABLE IF NOT EXISTS tagged_users (
+        client_id TEXT,
         reel_id TEXT,
         username TEXT,
         full_name TEXT,
@@ -105,6 +266,7 @@ def init_db():
     conn.execute("""
     CREATE TABLE IF NOT EXISTS posts (
         post_id          TEXT PRIMARY KEY,
+        client_id        TEXT,
         account_id       TEXT,
         caption          TEXT,
         caption_clean    TEXT,
@@ -134,6 +296,7 @@ def init_db():
     conn.execute("""
     CREATE TABLE IF NOT EXISTS scrape_jobs (
         job_id       TEXT PRIMARY KEY,
+        client_id    TEXT,
         username     TEXT,
         started_at   TIMESTAMP,
         finished_at  TIMESTAMP,
@@ -148,6 +311,7 @@ def init_db():
     conn.execute("""
     CREATE TABLE IF NOT EXISTS transcripts (
         post_id        TEXT PRIMARY KEY,
+        client_id      TEXT,
         provider       TEXT,
         model          TEXT,
         transcript     TEXT,
@@ -163,6 +327,7 @@ def init_db():
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS transcript_words (
+        client_id  TEXT,
         post_id    TEXT,
         word_index INTEGER,
         word       TEXT,
@@ -177,6 +342,7 @@ def init_db():
     conn.execute("""
     CREATE TABLE IF NOT EXISTS message_units (
         unit_id      TEXT PRIMARY KEY,
+        client_id    TEXT,
         post_id      TEXT,
         text         TEXT,
         claim        TEXT,
@@ -198,6 +364,7 @@ def init_db():
     conn.execute("""
     CREATE TABLE IF NOT EXISTS generated_content (
         gen_id       TEXT PRIMARY KEY,
+        client_id    TEXT,
         created_at   TIMESTAMP,
         topic        TEXT,
         content_type TEXT,
@@ -209,34 +376,54 @@ def init_db():
     )
     """)
 
-    # Migration: add Phase 2 columns if they don't exist yet
+    # Idempotent migrations for databases created before Phase 0 multi-client work.
     for col, typedef in [
         ("downloaded_at", "TIMESTAMP"),
         ("file_size_mb", "DOUBLE"),
-        # Phase 4
         ("extraction_cost_usd", "DOUBLE"),
     ]:
-        try:
-            conn.execute(f"ALTER TABLE transcripts ADD COLUMN {col} {typedef}")
-        except Exception:
-            pass
+        _add_column_if_missing(conn, "transcripts", col, typedef)
 
     for col, typedef in [
         ("downloaded_at", "TIMESTAMP"),
         ("file_size_mb", "DOUBLE"),
     ]:
-        try:
-            conn.execute(f"ALTER TABLE posts ADD COLUMN {col} {typedef}")
-        except Exception:
-            pass  # column already exists
+        _add_column_if_missing(conn, "posts", col, typedef)
+
+    _backfill_client_id(
+        conn,
+        [
+            "profiles",
+            "raw_scrapes",
+            "reels",
+            "comments",
+            "tagged_users",
+            "posts",
+            "scrape_jobs",
+            "transcripts",
+            "transcript_words",
+            "message_units",
+            "generated_content",
+        ],
+    )
+    _seed_demo_client(conn)
+    _backfill_client_post_links(conn)
 
     # Phase 9 — Indexes for query performance
     for ddl in [
+        "CREATE INDEX IF NOT EXISTS idx_client_accounts_client ON client_accounts(client_id)",
+        "CREATE INDEX IF NOT EXISTS idx_client_posts_client ON client_posts(client_id)",
+        "CREATE INDEX IF NOT EXISTS idx_client_posts_post ON client_posts(post_id)",
+        "CREATE INDEX IF NOT EXISTS idx_posts_client_id ON posts(client_id)",
         "CREATE INDEX IF NOT EXISTS idx_posts_account_id    ON posts(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_posts_posted_at     ON posts(posted_at)",
         "CREATE INDEX IF NOT EXISTS idx_posts_download_status ON posts(download_status)",
+        "CREATE INDEX IF NOT EXISTS idx_scrape_jobs_client_id ON scrape_jobs(client_id)",
+        "CREATE INDEX IF NOT EXISTS idx_generated_content_client_id ON generated_content(client_id)",
+        "CREATE INDEX IF NOT EXISTS idx_message_units_client_id ON message_units(client_id)",
         "CREATE INDEX IF NOT EXISTS idx_message_units_topic ON message_units(topic)",
         "CREATE INDEX IF NOT EXISTS idx_message_units_post_id ON message_units(post_id)",
+        "CREATE INDEX IF NOT EXISTS idx_transcripts_client_id ON transcripts(client_id)",
         "CREATE INDEX IF NOT EXISTS idx_transcripts_post_id ON transcripts(post_id)",
     ]:
         try:
@@ -255,7 +442,7 @@ def get_connection():
 # --------------------------------------------------------
 #  RAW SCRAPE SAVER
 # --------------------------------------------------------
-def save_raw_scrape(profile, items):
+def save_raw_scrape(profile, items, client_id: str = DEFAULT_CLIENT_ID):
     """Stores the raw JSON array exactly as returned. Skips duplicates by shortCode."""
     conn = duckdb.connect(DB_PATH)
 
@@ -266,16 +453,22 @@ def save_raw_scrape(profile, items):
         # Dedup: skip if this shortcode already exists in raw_scrapes
         if shortcode:
             existing = conn.execute(
-                "SELECT COUNT(*) FROM raw_scrapes WHERE json_extract_string(raw, '$.shortCode') = ?",
-                (shortcode,)
+                """
+                SELECT COUNT(*) FROM raw_scrapes
+                WHERE client_id = ?
+                  AND json_extract_string(raw, '$.shortCode') = ?
+                """,
+                (client_id, shortcode)
             ).fetchone()[0]
             if existing > 0:
                 skipped += 1
                 continue
 
         conn.execute("""
-            INSERT INTO raw_scrapes VALUES (?, ?, ?, ?)
+            INSERT INTO raw_scrapes (client_id, id, profile, raw, scraped_at)
+            VALUES (?, ?, ?, ?, ?)
         """, (
+            client_id,
             idx,
             profile,
             json.dumps(item),
@@ -290,9 +483,9 @@ def save_raw_scrape(profile, items):
 # --------------------------------------------------------
 #  STRUCTURED SCRAPE SAVER
 # --------------------------------------------------------
-def save_structured_scrape(profile, items):
+def save_structured_scrape(profile, items, client_id: str = DEFAULT_CLIENT_ID):
     """Wrapper matching your old function name."""
-    save_scrape(profile, items)
+    save_scrape(profile, items, client_id)
 
 
 def fix_timestamp(ts):
@@ -307,22 +500,30 @@ def fix_timestamp(ts):
 # --------------------------------------------------------
 #  STRUCTURED LOADER (YOUR ORIGINAL)
 # --------------------------------------------------------
-def save_scrape(profile, items):
+def save_scrape(profile, items, client_id: str = DEFAULT_CLIENT_ID):
     conn = duckdb.connect(DB_PATH)
 
     conn.execute("""
-        INSERT INTO profiles VALUES (?, ?, ?)
-    """, (profile, datetime.utcnow(), len(items)))
+        INSERT INTO profiles (client_id, profile, scraped_at, total_reels)
+        VALUES (?, ?, ?, ?)
+    """, (client_id, profile, datetime.utcnow(), len(items)))
 
     for item in items:
         reel_id = item.get("id")
 
         conn.execute("""
-            INSERT OR REPLACE INTO reels VALUES (
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+            INSERT OR REPLACE INTO reels (
+                reel_id, client_id, profile, shortcode, caption, likes, views,
+                video_play_count, comments_count, video_url, audio_url,
+                thumbnail_url, display_url, all_images, timestamp, location_name,
+                location_id, duration, is_pinned, is_sponsored, owner_username,
+                owner_id, raw, scraped_at
+            ) VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
             )
         """, (
             reel_id,                                    # reel_id
+            client_id,                                  # client_id
             profile,                                    # profile
             item.get("shortCode"),                      # shortcode
             item.get("caption"),                        # caption
@@ -350,8 +551,12 @@ def save_scrape(profile, items):
         # tagged users
         for u in item.get("taggedUsers", []):
             conn.execute("""
-                INSERT INTO tagged_users VALUES (?, ?, ?, ?, ?)
+                INSERT INTO tagged_users (
+                    client_id, reel_id, username, full_name, user_id, profile_pic_url
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
             """, (
+                client_id,
                 reel_id,
                 u.get("username"),
                 u.get("full_name"),
@@ -360,16 +565,20 @@ def save_scrape(profile, items):
             ))
 
         # comments
-        _insert_comments_recursive(conn, reel_id, item.get("latestComments", []))
+        _insert_comments_recursive(conn, reel_id, item.get("latestComments", []), client_id=client_id)
 
     conn.close()
 
 
-def _insert_comments_recursive(conn, reel_id, comments, parent_id=None):
+def _insert_comments_recursive(conn, reel_id, comments, parent_id=None, client_id: str = DEFAULT_CLIENT_ID):
     for c in comments:
         conn.execute("""
-            INSERT INTO comments VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO comments (
+                client_id, reel_id, comment_id, parent_id, username, text, likes, timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
+            client_id,
             reel_id,
             c.get("id"),
             parent_id,
@@ -380,7 +589,7 @@ def _insert_comments_recursive(conn, reel_id, comments, parent_id=None):
         ))
 
         if isinstance(c.get("replies"), list):
-            _insert_comments_recursive(conn, reel_id, c["replies"], c.get("id"))
+            _insert_comments_recursive(conn, reel_id, c["replies"], c.get("id"), client_id)
 
 
 # --------------------------------------------------------
@@ -447,7 +656,20 @@ def upsert_creator_account(username: str, item: dict) -> str:
     return account_id
 
 
-def upsert_post(account_id: str, item: dict) -> bool:
+def _link_post_to_client(conn, client_id: str, post_id: str):
+    conn.execute(
+        """
+        INSERT INTO client_posts (client_id, post_id, added_at)
+        SELECT ?, ?, ?
+        WHERE NOT EXISTS (
+            SELECT 1 FROM client_posts WHERE client_id = ? AND post_id = ?
+        )
+        """,
+        [client_id, post_id, datetime.utcnow(), client_id, post_id],
+    )
+
+
+def upsert_post(account_id: str, item: dict, client_id: str = DEFAULT_CLIENT_ID) -> bool:
     """Insert or update a post from a scraped Apify item.
     Returns True if this was a new post, False if updated."""
     conn = duckdb.connect(DB_PATH)
@@ -481,17 +703,25 @@ def upsert_post(account_id: str, item: dict) -> bool:
         conn.execute("""
             UPDATE posts
             SET likes = ?, views = ?, comments_count = ?, engagement_rate = ?,
-                scraped_at = ?, video_url = ?, audio_url = ?
+                scraped_at = ?, video_url = ?, audio_url = ?,
+                client_id = COALESCE(client_id, ?)
             WHERE post_id = ?
         """, (likes, views, item.get("commentsCount") or 0, engagement_rate,
-              now, item.get("videoUrl"), item.get("audioUrl"), post_id))
+              now, item.get("videoUrl"), item.get("audioUrl"), client_id, post_id))
     else:
         conn.execute("""
-            INSERT INTO posts VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            INSERT INTO posts (
+                post_id, client_id, account_id, caption, caption_clean, hashtags,
+                mentions, likes, views, comments_count, duration_sec, posted_at,
+                scraped_at, video_url, audio_url, thumbnail_url, is_pinned,
+                is_sponsored, engagement_rate, local_video_path, local_audio_path,
+                download_status, downloaded_at, file_size_mb, raw_json
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         """, (
             post_id,
+            client_id,
             account_id,
             caption,
             caption_clean,
@@ -517,17 +747,22 @@ def upsert_post(account_id: str, item: dict) -> bool:
             json.dumps(item),
         ))
 
+    _link_post_to_client(conn, client_id, post_id)
     conn.close()
     return is_new
 
 
-def start_scrape_job(username: str) -> str:
+def start_scrape_job(username: str, client_id: str = DEFAULT_CLIENT_ID) -> str:
     """Create a scrape_jobs row and return the job_id."""
     conn = duckdb.connect(DB_PATH)
     job_id = str(uuid.uuid4())
     conn.execute("""
-        INSERT INTO scrape_jobs VALUES (?, ?, ?, NULL, 0, 0, 'running', NULL)
-    """, (job_id, username, datetime.utcnow()))
+        INSERT INTO scrape_jobs (
+            job_id, client_id, username, started_at, finished_at,
+            reels_found, reels_new, status, error_msg
+        )
+        VALUES (?, ?, ?, ?, NULL, 0, 0, 'running', NULL)
+    """, (job_id, client_id, username, datetime.utcnow()))
     conn.close()
     return job_id
 
@@ -544,28 +779,48 @@ def finish_scrape_job(job_id: str, reels_found: int, reels_new: int,
     conn.close()
 
 
-def get_scrape_history() -> list:
+def get_scrape_history(client_id: Optional[str] = DEFAULT_CLIENT_ID) -> list:
     """Return recent scrape jobs ordered by newest first."""
     conn = duckdb.connect(DB_PATH)
-    rows = conn.execute("""
-        SELECT job_id, username, started_at, finished_at,
-               reels_found, reels_new, status, error_msg
-        FROM scrape_jobs ORDER BY started_at DESC LIMIT 50
-    """).fetchall()
+    if client_id:
+        rows = conn.execute("""
+            SELECT job_id, username, started_at, finished_at,
+                   reels_found, reels_new, status, error_msg
+            FROM scrape_jobs
+            WHERE client_id = ?
+            ORDER BY started_at DESC LIMIT 50
+        """, [client_id]).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT job_id, username, started_at, finished_at,
+                   reels_found, reels_new, status, error_msg
+            FROM scrape_jobs ORDER BY started_at DESC LIMIT 50
+        """).fetchall()
     conn.close()
     return rows
 
 
-def get_posts_stats() -> dict:
+def get_posts_stats(client_id: Optional[str] = DEFAULT_CLIENT_ID) -> dict:
     """Return aggregate stats for the posts table."""
     conn = duckdb.connect(DB_PATH)
-    row = conn.execute("""
-        SELECT COUNT(*) as total,
-               COUNT(DISTINCT account_id) as accounts,
-               AVG(engagement_rate) as avg_engagement,
-               SUM(CASE WHEN download_status = 'done' THEN 1 ELSE 0 END) as downloaded
-        FROM posts
-    """).fetchone()
+    if client_id:
+        row = conn.execute("""
+            SELECT COUNT(*) as total,
+                   COUNT(DISTINCT p.account_id) as accounts,
+                   AVG(p.engagement_rate) as avg_engagement,
+                   SUM(CASE WHEN p.download_status = 'done' THEN 1 ELSE 0 END) as downloaded
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            WHERE cp.client_id = ?
+        """, [client_id]).fetchone()
+    else:
+        row = conn.execute("""
+            SELECT COUNT(*) as total,
+                   COUNT(DISTINCT account_id) as accounts,
+                   AVG(engagement_rate) as avg_engagement,
+                   SUM(CASE WHEN download_status = 'done' THEN 1 ELSE 0 END) as downloaded
+            FROM posts
+        """).fetchone()
     conn.close()
     return {
         "total_posts": row[0] or 0,
@@ -573,4 +828,3 @@ def get_posts_stats() -> dict:
         "avg_engagement": round(row[2] or 0, 2),
         "downloaded": row[3] or 0,
     }
-

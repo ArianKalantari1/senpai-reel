@@ -30,6 +30,7 @@ def search_db(tmp_path):
 
     conn = duckdb.connect(db_mod.DB_PATH)
     now = datetime.utcnow()
+    client_id = db_mod.DEFAULT_CLIENT_ID
 
     # Insert two creator accounts and posts first (for JOINs)
     conn.execute(
@@ -37,33 +38,37 @@ def search_db(tmp_path):
         (now, now)
     )
     conn.execute("""
-        INSERT INTO posts (post_id, account_id, engagement_rate, download_status,
+        INSERT INTO posts (post_id, client_id, account_id, engagement_rate, download_status,
                            scraped_at, hashtags, mentions, video_url)
-        VALUES ('post_a', 'acc1', 5.0, 'done', ?, [], [], 'http://vid_a')
-    """, (now,))
+        VALUES ('post_a', ?, 'acc1', 5.0, 'done', ?, [], [], 'http://vid_a')
+    """, (client_id, now))
     conn.execute("""
-        INSERT INTO posts (post_id, account_id, engagement_rate, download_status,
+        INSERT INTO posts (post_id, client_id, account_id, engagement_rate, download_status,
                            scraped_at, hashtags, mentions, video_url)
-        VALUES ('post_b', 'acc1', 3.0, 'done', ?, [], [], 'http://vid_b')
-    """, (now,))
+        VALUES ('post_b', ?, 'acc1', 3.0, 'done', ?, [], [], 'http://vid_b')
+    """, (client_id, now))
+    conn.executemany(
+        "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+        [(client_id, "post_a", now), (client_id, "post_b", now)],
+    )
 
     # Insert message units with embeddings
     uid_a = str(uuid.uuid4())
     uid_b = str(uuid.uuid4())
     conn.execute("""
         INSERT INTO message_units
-            (unit_id, post_id, text, claim, topic, content_type, confidence,
+            (unit_id, client_id, post_id, text, claim, topic, content_type, confidence,
              extracted_at, model, embedding, embedded_at)
-        VALUES (?, 'post_a', 'Resume keyword tips', 'Keywords matter', 'Resume', 'tip',
+        VALUES (?, ?, 'post_a', 'Resume keyword tips', 'Keywords matter', 'Resume', 'tip',
                 0.9, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
-    """, (uid_a, now, vec_a, now))
+    """, (uid_a, client_id, now, vec_a, now))
     conn.execute("""
         INSERT INTO message_units
-            (unit_id, post_id, text, claim, topic, content_type, confidence,
+            (unit_id, client_id, post_id, text, claim, topic, content_type, confidence,
              extracted_at, model, embedding, embedded_at)
-        VALUES (?, 'post_b', 'Interview STAR method', 'Structure your answers', 'Interview', 'tip',
+        VALUES (?, ?, 'post_b', 'Interview STAR method', 'Structure your answers', 'Interview', 'tip',
                 0.85, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
-    """, (uid_b, now, vec_b, now))
+    """, (uid_b, client_id, now, vec_b, now))
 
     conn.close()
     yield db_mod.DB_PATH, uid_a, uid_b

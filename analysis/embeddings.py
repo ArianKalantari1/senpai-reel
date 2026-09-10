@@ -12,7 +12,7 @@ from typing import List
 
 import requests
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ def embed_pending_units(
     api_key: str,
     batch_size: int = 50,
     progress_callback=None,
+    client_id: str = DEFAULT_CLIENT_ID,
 ) -> dict:
     """
     Embed all message_units that don't have an embedding yet.
@@ -68,11 +69,14 @@ def embed_pending_units(
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT unit_id, text FROM message_units
-        WHERE embedding IS NULL
+        SELECT mu.unit_id, mu.text
+        FROM message_units mu
+        JOIN client_posts cp ON mu.post_id = cp.post_id
+        WHERE cp.client_id = ?
+          AND mu.embedding IS NULL
         LIMIT ?
         """,
-        [batch_size],
+        [client_id, batch_size],
     ).fetchall()
     conn.close()
 

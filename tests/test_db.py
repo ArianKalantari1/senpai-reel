@@ -23,6 +23,7 @@ def tmp_db(tmp_path):
 
 class TestInitDb:
     EXPECTED_TABLES = {
+        "clients", "client_accounts", "client_posts",
         "profiles", "raw_scrapes", "reels", "comments", "tagged_users",
         "creator_accounts", "posts", "scrape_jobs", "transcripts",
         "transcript_words", "message_units", "generated_content",
@@ -39,6 +40,67 @@ class TestInitDb:
         """Calling init_db() a second time should not raise."""
         _, db_mod = tmp_db
         db_mod.init_db()  # second call — must not crash
+
+    def test_demo_client_seeded(self, tmp_db):
+        db_file, db_mod = tmp_db
+        conn = duckdb.connect(db_file)
+        client = conn.execute(
+            "SELECT name, niche FROM clients WHERE client_id = ?",
+            [db_mod.DEFAULT_CLIENT_ID],
+        ).fetchone()
+        accounts = conn.execute(
+            "SELECT COUNT(*) FROM client_accounts WHERE client_id = ?",
+            [db_mod.DEFAULT_CLIENT_ID],
+        ).fetchone()[0]
+        conn.close()
+        assert client == (db_mod.DEFAULT_CLIENT_NAME, db_mod.DEFAULT_CLIENT_NICHE)
+        assert accounts > 0
+
+    def test_existing_posts_are_backfilled_to_demo_client(self, tmp_path):
+        import core.db as db_mod
+
+        db_file = str(tmp_path / "legacy.duckdb")
+        conn = duckdb.connect(db_file)
+        now = datetime.utcnow()
+        conn.execute("""
+            CREATE TABLE posts (
+                post_id TEXT PRIMARY KEY,
+                account_id TEXT,
+                scraped_at TIMESTAMP,
+                download_status TEXT,
+                engagement_rate DOUBLE
+            )
+        """)
+        conn.execute(
+            "INSERT INTO posts VALUES ('legacy_post', 'acc1', ?, 'done', 7.5)",
+            [now],
+        )
+        conn.close()
+
+        old_path = db_mod.DB_PATH
+        db_mod.DB_PATH = db_file
+        try:
+            db_mod.init_db()
+            conn = duckdb.connect(db_file)
+            post_client = conn.execute(
+                "SELECT client_id FROM posts WHERE post_id = 'legacy_post'"
+            ).fetchone()[0]
+            link = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM client_posts
+                WHERE client_id = ? AND post_id = 'legacy_post'
+                """,
+                [db_mod.DEFAULT_CLIENT_ID],
+            ).fetchone()[0]
+            row_count = conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+            conn.close()
+        finally:
+            db_mod.DB_PATH = old_path
+
+        assert post_client == db_mod.DEFAULT_CLIENT_ID
+        assert link == 1
+        assert row_count == 1
 
 
 # ── start_scrape_job / finish_scrape_job ─────────────────────────────────────
@@ -111,10 +173,14 @@ class TestGetPostsStats:
         now = datetime.utcnow()
         for i, post_id in enumerate(["p1", "p2"]):
             conn.execute(
-                """INSERT INTO posts (post_id, account_id, engagement_rate, download_status,
+                """INSERT INTO posts (post_id, client_id, account_id, engagement_rate, download_status,
                    scraped_at, hashtags, mentions)
-                   VALUES (?, 'acc1', 5.0, 'pending', ?, [], [])""",
-                (post_id, now)
+                   VALUES (?, ?, 'acc1', 5.0, 'pending', ?, [], [])""",
+                (post_id, db_mod.DEFAULT_CLIENT_ID, now)
+            )
+            conn.execute(
+                "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+                [db_mod.DEFAULT_CLIENT_ID, post_id, now],
             )
         conn.execute(
             "UPDATE posts SET download_status = 'done' WHERE post_id = 'p1'"

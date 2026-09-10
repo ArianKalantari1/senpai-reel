@@ -12,7 +12,7 @@ from pathlib import Path
 import requests
 import yt_dlp
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,11 @@ def _update_db(post_id: str, status: str, path, size_mb):
         logger.error("DB update failed for post %s: %s", post_id, e)
 
 
-def download_pending_posts(batch_size: int = 20, progress_callback=None) -> dict:
+def download_pending_posts(
+    batch_size: int = 20,
+    progress_callback=None,
+    client_id: str = DEFAULT_CLIENT_ID,
+) -> dict:
     """
     Download all posts with download_status = 'pending'.
 
@@ -144,13 +148,16 @@ def download_pending_posts(batch_size: int = 20, progress_callback=None) -> dict
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT post_id, video_url FROM posts
-        WHERE download_status = 'pending'
-          AND video_url IS NOT NULL
-          AND video_url != ''
+        SELECT p.post_id, p.video_url
+        FROM posts p
+        JOIN client_posts cp ON p.post_id = cp.post_id
+        WHERE cp.client_id = ?
+          AND p.download_status = 'pending'
+          AND p.video_url IS NOT NULL
+          AND p.video_url != ''
         LIMIT ?
         """,
-        [batch_size],
+        [client_id, batch_size],
     ).fetchall()
     conn.close()
 

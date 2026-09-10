@@ -316,11 +316,16 @@ class TestTranscribePost:
         conn = duckdb.connect(db_mod.DB_PATH)
         from datetime import datetime
         now = datetime.utcnow()
+        client_id = db_mod.DEFAULT_CLIENT_ID
         conn.execute("""
-            INSERT INTO posts (post_id, account_id, engagement_rate, download_status,
+            INSERT INTO posts (post_id, client_id, account_id, engagement_rate, download_status,
                 scraped_at, hashtags, mentions, local_audio_path)
-            VALUES ('post_tp', 'acc1', 0, 'done', ?, [], [], ?)
-        """, (now, str(audio_file)))
+            VALUES ('post_tp', ?, 'acc1', 0, 'done', ?, [], [], ?)
+        """, (client_id, now, str(audio_file)))
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, 'post_tp', ?)",
+            [client_id, now],
+        )
         conn.close()
 
         mock_resp = MagicMock()

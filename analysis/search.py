@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 from analysis.embeddings import embed_text
 
 
@@ -34,6 +34,7 @@ def semantic_search(
     topic_filter: Optional[str] = None,
     content_type_filter: Optional[str] = None,
     top_k: int = 20,
+    client_id: Optional[str] = DEFAULT_CLIENT_ID,
 ) -> List[SearchResult]:
     """
     Search message_units by semantic similarity.
@@ -62,6 +63,12 @@ def semantic_search(
         if content_type_filter and content_type_filter != "All":
             where_clauses.append("mu.content_type = ?")
             where_params.append(content_type_filter)
+
+        if client_id:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
+            )
+            where_params.append(client_id)
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
@@ -117,6 +124,8 @@ def keyword_search(
     keyword: str,
     topic_filter: Optional[str] = None,
     top_k: int = 50,
+    client_id: Optional[str] = DEFAULT_CLIENT_ID,
+    content_type_filter: Optional[str] = None,
 ) -> List[SearchResult]:
     """Fast keyword search (no embedding needed) — fallback when no API key."""
     conn = get_connection()
@@ -127,6 +136,16 @@ def keyword_search(
         if topic_filter and topic_filter != "All":
             where_clauses.append("mu.topic = ?")
             params.append(topic_filter)
+
+        if content_type_filter and content_type_filter != "All":
+            where_clauses.append("mu.content_type = ?")
+            params.append(content_type_filter)
+
+        if client_id:
+            where_clauses.append(
+                "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
+            )
+            params.append(client_id)
 
         where_sql = "WHERE " + " AND ".join(where_clauses)
         params.append(top_k)

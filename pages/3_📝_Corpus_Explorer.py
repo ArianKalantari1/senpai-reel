@@ -1,29 +1,49 @@
 import streamlit as st
-import duckdb
 import pandas as pd
+
+from core.client_context import render_client_selector
+from core.db import get_connection, init_db
 
 st.set_page_config(page_title="Corpus Explorer", page_icon="📝", layout="wide")
 st.title("📝 Corpus Explorer")
-st.caption("Search transcripts, view full text, track transcription cost")
-
-DB_PATH = "reels.duckdb"
-
-
-@st.cache_resource
-def get_conn():
-    return duckdb.connect(DB_PATH)
-
-
-conn = get_conn()
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+st.caption(f"Search transcripts for {active_client['name']}, view full text, track transcription cost")
 
 
 def get_transcription_stats():
+    conn = get_connection()
     try:
         total_audio = conn.execute(
-            "SELECT COUNT(*) FROM posts WHERE local_audio_path IS NOT NULL AND local_audio_path != ''"
+            """
+            SELECT COUNT(*)
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            WHERE cp.client_id = ?
+              AND p.local_audio_path IS NOT NULL
+              AND p.local_audio_path != ''
+            """,
+            [client_id],
         ).fetchone()[0]
-        transcribed = conn.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0]
-        total_cost = conn.execute("SELECT COALESCE(SUM(cost_usd), 0) FROM transcripts").fetchone()[0]
+        transcribed = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM transcripts t
+            JOIN client_posts cp ON t.post_id = cp.post_id
+            WHERE cp.client_id = ?
+            """,
+            [client_id],
+        ).fetchone()[0]
+        total_cost = conn.execute(
+            """
+            SELECT COALESCE(SUM(t.cost_usd), 0)
+            FROM transcripts t
+            JOIN client_posts cp ON t.post_id = cp.post_id
+            WHERE cp.client_id = ?
+            """,
+            [client_id],
+        ).fetchone()[0]
         pending = max(total_audio - transcribed, 0)
         return {
             "transcribed": transcribed,
@@ -33,6 +53,8 @@ def get_transcription_stats():
         }
     except Exception:
         return {"transcribed": 0, "pending": 0, "total_audio": 0, "total_cost_usd": 0.0}
+    finally:
+        conn.close()
 
 
 stats = get_transcription_stats()
@@ -77,7 +99,7 @@ with st.expander("⚙️ Run Transcription Queue"):
                 else:
                     status_txt.info(f"✅ {done}/{total}: `{post_id}`")
 
-            result = run_transcription_queue(api_key, prov, batch, _cb)
+            result = run_transcription_queue(api_key, prov, batch, _cb, client_id)
             status_txt.empty()
             prog.empty()
             st.success(
@@ -108,7 +130,7 @@ with st.expander("🎙️ Transcribe a single post"):
             from processing.transcribe import transcribe_post
             with st.spinner("Transcribing…"):
                 try:
-                    res = transcribe_post(pid.strip(), key, prov_single)
+                    res = transcribe_post(pid.strip(), key, prov_single, client_id)
                     st.success(f"Done — {res.word_count} words, ${res.cost_usd:.4f}")
                     st.write(res.transcript)
                 except Exception as e:
@@ -120,32 +142,47 @@ st.markdown("---")
 search = st.text_input("🔍 Search transcripts", placeholder="e.g., ATS, resume, STAR method")
 
 try:
+    conn = get_connection()
     if search:
         df = conn.execute(
             """
-            SELECT t.post_id, p.account_id, t.transcript, t.confidence,
+            SELECT t.post_id, COALESCE(ca.username, p.account_id) AS account_id,
+                   t.transcript, t.confidence,
                    t.duration_sec, t.word_count, t.cost_usd, t.transcribed_at
             FROM transcripts t
+            JOIN client_posts cp ON t.post_id = cp.post_id
             LEFT JOIN posts p ON t.post_id = p.post_id
+            LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
             WHERE LOWER(t.transcript) LIKE ?
+              AND cp.client_id = ?
             ORDER BY t.transcribed_at DESC
             LIMIT 100
             """,
-            [f"%{search.lower()}%"],
+            [f"%{search.lower()}%", client_id],
         ).df()
     else:
         df = conn.execute(
             """
-            SELECT t.post_id, p.account_id, t.transcript, t.confidence,
+            SELECT t.post_id, COALESCE(ca.username, p.account_id) AS account_id,
+                   t.transcript, t.confidence,
                    t.duration_sec, t.word_count, t.cost_usd, t.transcribed_at
             FROM transcripts t
+            JOIN client_posts cp ON t.post_id = cp.post_id
             LEFT JOIN posts p ON t.post_id = p.post_id
+            LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
+            WHERE cp.client_id = ?
             ORDER BY t.transcribed_at DESC
             LIMIT 100
             """,
+            [client_id],
         ).df()
 except Exception:
     df = pd.DataFrame()
+finally:
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 if df.empty:
     st.info("No transcripts yet. Run a scrape, download videos, extract audio, then transcribe.")
@@ -173,13 +210,19 @@ else:
 
         # Word timestamps
         try:
+            conn = get_connection()
             words_df = conn.execute(
                 "SELECT word_index, word, start_sec, end_sec, confidence "
-                "FROM transcript_words WHERE post_id = ? ORDER BY word_index",
-                [selected_post],
+                "FROM transcript_words WHERE post_id = ? AND client_id = ? ORDER BY word_index",
+                [selected_post, client_id],
             ).df()
             if not words_df.empty:
                 with st.expander("📊 Word Timestamps"):
                     st.dataframe(words_df, width="stretch", hide_index=True)
         except Exception:
             pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass

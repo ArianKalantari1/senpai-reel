@@ -8,14 +8,17 @@ from datetime import datetime, timedelta
 import re
 from collections import Counter, defaultdict
 
+from core.db import DEFAULT_CLIENT_ID
+
 class InstagramGraphAnalyzer:
     """
     Create rich graph networks from Instagram data WITHOUT expensive vision APIs
     Focus on relationships, patterns, and network analysis
     """
     
-    def __init__(self, db_path="reels.duckdb"):
+    def __init__(self, db_path="reels.duckdb", client_id=DEFAULT_CLIENT_ID):
         self.conn = duckdb.connect(db_path)
+        self.client_id = client_id
         self.graph = nx.Graph()
         
     def extract_hashtags_mentions(self, text):
@@ -34,8 +37,9 @@ class InstagramGraphAnalyzer:
         # Get all posts with metadata
         results = self.conn.execute("""
             SELECT raw FROM raw_scrapes 
+            WHERE client_id = ?
             ORDER BY scraped_at DESC
-        """).fetchall()
+        """, [self.client_id]).fetchall()
         
         posts = []
         for (raw,) in results:

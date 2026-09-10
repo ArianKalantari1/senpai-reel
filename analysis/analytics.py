@@ -8,14 +8,31 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 
 
-def get_creator_leaderboard(limit: int = 20) -> pd.DataFrame:
+def _client_scope(alias: str, client_id: str | None, params: list) -> str:
+    if not client_id:
+        return ""
+    params.append(client_id)
+    return (
+        f"EXISTS (SELECT 1 FROM client_posts cp "
+        f"WHERE cp.post_id = {alias}.post_id AND cp.client_id = ?)"
+    )
+
+
+def get_creator_leaderboard(
+    limit: int = 20,
+    client_id: str | None = DEFAULT_CLIENT_ID,
+) -> pd.DataFrame:
     conn = get_connection()
     try:
+        params = []
+        scope = _client_scope("p", client_id, params)
+        where_sql = f"WHERE {scope}" if scope else ""
+        params.append(limit)
         return conn.execute(
-            f"""
+            """
             SELECT
                 ca.username,
                 COUNT(p.post_id)           AS total_posts,
@@ -26,40 +43,52 @@ def get_creator_leaderboard(limit: int = 20) -> pd.DataFrame:
                 ROUND(AVG(p.duration_sec), 0) AS avg_duration_sec
             FROM posts p
             JOIN creator_accounts ca ON p.account_id = ca.account_id
+            {where_sql}
             GROUP BY ca.username
             ORDER BY avg_engagement DESC
-            LIMIT {limit}
-            """
+            LIMIT ?
+            """.format(where_sql=where_sql),
+            params,
         ).df()
     finally:
         conn.close()
 
 
-def get_topic_distribution() -> pd.DataFrame:
+def get_topic_distribution(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.DataFrame:
     conn = get_connection()
     try:
+        params = []
+        scope = _client_scope("mu", client_id, params)
+        where_sql = f"WHERE {scope}" if scope else ""
         return conn.execute(
             """
-            SELECT topic, COUNT(*) AS unit_count
-            FROM message_units
-            GROUP BY topic
+            SELECT mu.topic, COUNT(*) AS unit_count
+            FROM message_units mu
+            {where_sql}
+            GROUP BY mu.topic
             ORDER BY unit_count DESC
-            """
+            """.format(where_sql=where_sql),
+            params,
         ).df()
     finally:
         conn.close()
 
 
-def get_content_gap_matrix() -> pd.DataFrame:
+def get_content_gap_matrix(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.DataFrame:
     """Returns a pivot table: topic (rows) × content_type (cols) = unit count."""
     conn = get_connection()
     try:
+        params = []
+        scope = _client_scope("mu", client_id, params)
+        where_sql = f"WHERE {scope}" if scope else ""
         df = conn.execute(
             """
-            SELECT topic, content_type, COUNT(*) AS cnt
-            FROM message_units
-            GROUP BY topic, content_type
-            """
+            SELECT mu.topic, mu.content_type, COUNT(*) AS cnt
+            FROM message_units mu
+            {where_sql}
+            GROUP BY mu.topic, mu.content_type
+            """.format(where_sql=where_sql),
+            params,
         ).df()
     finally:
         conn.close()
@@ -70,12 +99,27 @@ def get_content_gap_matrix() -> pd.DataFrame:
     return pivot
 
 
-def get_top_posts(topic: str = "All", limit: int = 20) -> pd.DataFrame:
+def get_top_posts(
+    topic: str = "All",
+    limit: int = 20,
+    client_id: str | None = DEFAULT_CLIENT_ID,
+) -> pd.DataFrame:
     conn = get_connection()
     try:
-        where = "" if topic == "All" else f"WHERE mu.topic = '{topic}'"
+        params = []
+        where_clauses = []
+        scope = _client_scope("p", client_id, params)
+        if scope:
+            where_clauses.append(scope)
+        topic_join = ""
+        if topic != "All":
+            topic_join = "LEFT JOIN message_units mu ON p.post_id = mu.post_id"
+            where_clauses.append("mu.topic = ?")
+            params.append(topic)
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        params.append(limit)
         return conn.execute(
-            f"""
+            """
             SELECT DISTINCT
                 p.post_id,
                 ca.username,
@@ -89,21 +133,32 @@ def get_top_posts(topic: str = "All", limit: int = 20) -> pd.DataFrame:
                 p.hashtags
             FROM posts p
             JOIN creator_accounts ca ON p.account_id = ca.account_id
-            {'LEFT JOIN message_units mu ON p.post_id = mu.post_id ' + where if topic != 'All' else ''}
+            {topic_join}
+            {where_sql}
             ORDER BY p.engagement_rate DESC NULLS LAST
-            LIMIT {limit}
-            """
+            LIMIT ?
+            """.format(topic_join=topic_join, where_sql=where_sql),
+            params,
         ).df()
     finally:
         conn.close()
 
 
-def get_hashtag_intelligence(limit: int = 30) -> pd.DataFrame:
+def get_hashtag_intelligence(
+    limit: int = 30,
+    client_id: str | None = DEFAULT_CLIENT_ID,
+) -> pd.DataFrame:
     """Most-used hashtags across all posts."""
     conn = get_connection()
     try:
+        params = []
+        scope = _client_scope("p", client_id, params)
+        where_sql = "WHERE p.hashtags IS NOT NULL"
+        if scope:
+            where_sql += f" AND {scope}"
         df = conn.execute(
-            "SELECT hashtags FROM posts WHERE hashtags IS NOT NULL"
+            f"SELECT p.hashtags FROM posts p {where_sql}",
+            params,
         ).df()
     finally:
         conn.close()
@@ -123,10 +178,15 @@ def get_hashtag_intelligence(limit: int = 30) -> pd.DataFrame:
     return pd.DataFrame(top, columns=["hashtag", "count"])
 
 
-def get_posting_cadence() -> pd.DataFrame:
+def get_posting_cadence(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.DataFrame:
     """Posts per week per creator."""
     conn = get_connection()
     try:
+        params = []
+        scope = _client_scope("p", client_id, params)
+        where_clauses = ["p.posted_at IS NOT NULL"]
+        if scope:
+            where_clauses.append(scope)
         return conn.execute(
             """
             SELECT
@@ -135,10 +195,11 @@ def get_posting_cadence() -> pd.DataFrame:
                 COUNT(*) AS posts
             FROM posts p
             JOIN creator_accounts ca ON p.account_id = ca.account_id
-            WHERE p.posted_at IS NOT NULL
+            WHERE {where_sql}
             GROUP BY ca.username, week
             ORDER BY week DESC, posts DESC
-            """
+            """.format(where_sql=" AND ".join(where_clauses)),
+            params,
         ).df()
     finally:
         conn.close()

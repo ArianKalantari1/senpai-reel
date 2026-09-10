@@ -9,14 +9,17 @@ from datetime import datetime
 import joblib
 import os
 
+from core.db import DEFAULT_CLIENT_ID
+
 class EngagementPredictor:
     """
     Free ML model to predict video engagement using only metadata
     No expensive vision APIs needed!
     """
     
-    def __init__(self, db_path="reels.duckdb"):
+    def __init__(self, db_path="reels.duckdb", client_id=DEFAULT_CLIENT_ID):
         self.conn = duckdb.connect(db_path)
+        self.client_id = client_id
         self.model = RandomForestRegressor(n_estimators=100, random_state=42)
         self.feature_names = []
         self.model_trained = False
@@ -76,9 +79,9 @@ class EngagementPredictor:
         """Get average engagement rate for owner"""
         try:
             results = self.conn.execute("""
-                SELECT raw FROM raw_scrapes 
-                WHERE raw LIKE ? 
-            """, [f'%{owner}%']).fetchall()
+                SELECT raw FROM raw_scrapes
+                WHERE client_id = ? AND raw LIKE ?
+            """, [self.client_id, f'%{owner}%']).fetchall()
             
             engagements = []
             for (raw,) in results:
@@ -98,7 +101,10 @@ class EngagementPredictor:
     
     def prepare_training_data(self):
         """Prepare training data from database"""
-        results = self.conn.execute("SELECT raw FROM raw_scrapes").fetchall()
+        results = self.conn.execute(
+            "SELECT raw FROM raw_scrapes WHERE client_id = ?",
+            [self.client_id],
+        ).fetchall()
         
         X = []
         y = []
@@ -222,7 +228,10 @@ class EngagementPredictor:
     def generate_content_recommendations(self):
         """Generate content strategy recommendations"""
         # Analyze historical high performers
-        results = self.conn.execute("SELECT raw FROM raw_scrapes").fetchall()
+        results = self.conn.execute(
+            "SELECT raw FROM raw_scrapes WHERE client_id = ?",
+            [self.client_id],
+        ).fetchall()
         
         high_performers = []
         all_posts = []
@@ -304,7 +313,10 @@ def main():
     if predictor.train_model():
         
         # Get sample post for testing
-        sample_result = predictor.conn.execute("SELECT raw FROM raw_scrapes LIMIT 1").fetchone()
+        sample_result = predictor.conn.execute(
+            "SELECT raw FROM raw_scrapes WHERE client_id = ? LIMIT 1",
+            [predictor.client_id],
+        ).fetchone()
         
         if sample_result:
             sample_post = json.loads(sample_result[0])

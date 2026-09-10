@@ -14,7 +14,7 @@ from typing import List, Optional
 
 import requests
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 from analysis.prompts import (
     CAPTION_SYSTEM, CAPTION_USER,
     HOOKS_SYSTEM, HOOKS_USER,
@@ -41,6 +41,28 @@ class GeneratedContent:
     tokens_used: int
     cost_usd: float
     created_at: datetime
+    client_id: str = DEFAULT_CLIENT_ID
+
+
+def _with_client_context(user_msg: str, client_context: Optional[dict]) -> str:
+    if not client_context:
+        return user_msg
+
+    lines = []
+    for label, key in [
+        ("Client", "name"),
+        ("Niche", "niche"),
+        ("Target audience", "target_audience"),
+        ("Brand voice", "brand_voice_notes"),
+        ("Notes", "notes"),
+    ]:
+        value = (client_context.get(key) or "").strip()
+        if value:
+            lines.append(f"{label}: {value}")
+
+    if not lines:
+        return user_msg
+    return f"{user_msg}\n\nClient context:\n" + "\n".join(lines)
 
 
 def _call_gpt(
@@ -89,9 +111,12 @@ def generate_caption(
     tone: str,
     reference_units: list,
     openai_api_key: str,
+    client_id: str = DEFAULT_CLIENT_ID,
+    client_context: Optional[dict] = None,
 ) -> GeneratedContent:
     context = format_reference_context(reference_units)
     user_msg = CAPTION_USER.format(topic=topic, tone=tone, angle=angle, reference_context=context)
+    user_msg = _with_client_context(user_msg, client_context)
     text, tokens, cost = _call_gpt(CAPTION_SYSTEM, user_msg, openai_api_key, max_tokens=600)
 
     result = GeneratedContent(
@@ -103,8 +128,9 @@ def generate_caption(
         tokens_used=tokens,
         cost_usd=cost,
         created_at=datetime.utcnow(),
+        client_id=client_id,
     )
-    _save(result, reference_units)
+    _save(result, reference_units, client_id)
     return result
 
 
@@ -114,10 +140,13 @@ def generate_hooks(
     reference_units: list,
     openai_api_key: str,
     count: int = 5,
+    client_id: str = DEFAULT_CLIENT_ID,
+    client_context: Optional[dict] = None,
 ) -> GeneratedContent:
     system = HOOKS_SYSTEM.format(count=count)
     context = format_reference_context(reference_units)
     user_msg = HOOKS_USER.format(topic=topic, angle=angle, reference_context=context, count=count)
+    user_msg = _with_client_context(user_msg, client_context)
     text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=400)
 
     result = GeneratedContent(
@@ -129,8 +158,9 @@ def generate_hooks(
         tokens_used=tokens,
         cost_usd=cost,
         created_at=datetime.utcnow(),
+        client_id=client_id,
     )
-    _save(result, reference_units)
+    _save(result, reference_units, client_id)
     return result
 
 
@@ -140,6 +170,8 @@ def generate_script(
     tone: str,
     reference_units: list,
     openai_api_key: str,
+    client_id: str = DEFAULT_CLIENT_ID,
+    client_context: Optional[dict] = None,
 ) -> GeneratedContent:
     word_count = int(duration_sec / 60 * 130)
     system = SCRIPT_SYSTEM.format(duration_sec=duration_sec, word_count=word_count, tone=tone)
@@ -147,6 +179,7 @@ def generate_script(
     user_msg = SCRIPT_USER.format(
         topic=topic, duration_sec=duration_sec, tone=tone, reference_context=context
     )
+    user_msg = _with_client_context(user_msg, client_context)
     text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=800)
 
     result = GeneratedContent(
@@ -158,12 +191,17 @@ def generate_script(
         tokens_used=tokens,
         cost_usd=cost,
         created_at=datetime.utcnow(),
+        client_id=client_id,
     )
-    _save(result, reference_units)
+    _save(result, reference_units, client_id)
     return result
 
 
-def _save(content: GeneratedContent, reference_units: list):
+def _save(
+    content: GeneratedContent,
+    reference_units: list,
+    client_id: str = DEFAULT_CLIENT_ID,
+):
     """Persist generated content to DB."""
     source_ids = [getattr(u, "unit_id", "") for u in reference_units]
     conn = get_connection()
@@ -171,12 +209,12 @@ def _save(content: GeneratedContent, reference_units: list):
         conn.execute(
             """
             INSERT INTO generated_content
-                (gen_id, created_at, topic, content_type, output_text, model,
+                (gen_id, client_id, created_at, topic, content_type, output_text, model,
                  source_units, tokens_used, cost_usd)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                content.gen_id, content.created_at, content.topic, content.content_type,
+                content.gen_id, client_id, content.created_at, content.topic, content.content_type,
                 content.output_text, content.model, source_ids,
                 content.tokens_used, content.cost_usd,
             ],

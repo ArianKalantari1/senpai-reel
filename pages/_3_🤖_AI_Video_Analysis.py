@@ -1,28 +1,36 @@
 import streamlit as st
 import json
-import duckdb
 import os
 from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 
+from core.client_context import render_client_selector
+from core.db import get_connection, init_db
+
 st.set_page_config(page_title="AI Video Analysis", page_icon="🤖", layout="wide")
 st.title("🤖 AI Video Analysis Dashboard")
 st.write("AI-powered insights from your Instagram reel videos")
 
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+
 @st.cache_data
-def analyze_videos():
+def analyze_videos(client_id):
     """Run AI analysis on downloaded videos"""
-    conn = duckdb.connect("reels.duckdb")
+    conn = get_connection()
     downloads_path = "downloads"
     
     if not os.path.exists(downloads_path):
+        conn.close()
         return []
     
     video_files = [f for f in os.listdir(downloads_path) if f.endswith(('.mp4', '.mov', '.avi'))]
     
     if not video_files:
+        conn.close()
         return []
     
     results = []
@@ -34,10 +42,10 @@ def analyze_videos():
         try:
             # Get metadata
             metadata_result = conn.execute("""
-                SELECT raw FROM raw_scrapes 
-                WHERE raw LIKE ? 
+                SELECT raw FROM raw_scrapes
+                WHERE client_id = ? AND raw LIKE ?
                 LIMIT 1
-            """, [f'%{short_code}%']).fetchone()
+            """, [client_id, f'%{short_code}%']).fetchone()
             
             if not metadata_result:
                 continue
@@ -119,11 +127,12 @@ def analyze_videos():
         
         results.append(result)
     
+    conn.close()
     return results
 
 # Run analysis
 with st.spinner("🤖 Running AI analysis on videos..."):
-    analysis_results = analyze_videos()
+    analysis_results = analyze_videos(client_id)
 
 if not analysis_results:
     st.warning("⚠️ No videos found for analysis. Please download some videos first!")

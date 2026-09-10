@@ -4,23 +4,26 @@ import requests
 import os
 from urllib.parse import quote
 
+from core.db import DEFAULT_CLIENT_ID
+
 class InstagramVideoDownloader:
-    def __init__(self):
+    def __init__(self, client_id=None):
         self.conn = duckdb.connect("reels.duckdb")
+        self.client_id = client_id or os.getenv("SENPAI_CLIENT_ID", DEFAULT_CLIENT_ID)
         os.makedirs("downloads", exist_ok=True)
     
     def get_post_urls(self, limit=10, profile=None):
         """Get Instagram post URLs from database"""
-        query = "SELECT raw FROM raw_scrapes"
-        params = []
+        query = "SELECT raw FROM raw_scrapes WHERE client_id = ?"
+        params = [self.client_id]
         
         if profile:
-            query += " WHERE profile = ?"
+            query += " AND profile = ?"
             params.append(profile)
         
         query += f" ORDER BY scraped_at DESC LIMIT {limit}"
         
-        results = self.conn.execute(query, params).fetchall() if params else self.conn.execute(query).fetchall()
+        results = self.conn.execute(query, params).fetchall()
         
         post_data = []
         for (raw,) in results:

@@ -22,11 +22,21 @@ def queue_db(tmp_path):
 def _seed_transcript(db_mod, post_id="post_t1", transcript="Resume tips for job seekers. Apply these now."):
     conn = duckdb.connect(db_mod.DB_PATH)
     now = datetime.utcnow()
+    client_id = db_mod.DEFAULT_CLIENT_ID
     conn.execute("""
-        INSERT INTO transcripts (post_id, provider, model, transcript, language,
+        INSERT INTO posts (post_id, client_id, account_id, engagement_rate, download_status,
+            scraped_at, hashtags, mentions)
+        VALUES (?, ?, 'acc1', 0, 'done', ?, [], [])
+    """, (post_id, client_id, now))
+    conn.execute(
+        "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+        [client_id, post_id, now],
+    )
+    conn.execute("""
+        INSERT INTO transcripts (post_id, client_id, provider, model, transcript, language,
             confidence, duration_sec, word_count, transcribed_at, cost_usd)
-        VALUES (?, 'deepgram', 'nova-2', ?, 'en', 0.95, 30.0, 8, ?, 0.003)
-    """, (post_id, transcript, now))
+        VALUES (?, ?, 'deepgram', 'nova-2', ?, 'en', 0.95, 30.0, 8, ?, 0.003)
+    """, (post_id, client_id, transcript, now))
     conn.close()
 
 

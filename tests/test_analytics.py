@@ -21,6 +21,7 @@ def _seed_basic_data(db_mod):
     """Insert two accounts, 3 posts, and a few message units."""
     conn = duckdb.connect(db_mod.DB_PATH)
     now = datetime.utcnow()
+    client_id = db_mod.DEFAULT_CLIENT_ID
 
     conn.execute(
         "INSERT INTO creator_accounts VALUES ('acc1','alpha',NULL,NULL,5000,NULL,NULL,FALSE,NULL,NULL,NULL,?,?)",
@@ -37,10 +38,14 @@ def _seed_basic_data(db_mod):
         ("p3", "acc2",  8.0,  800,  64, ["salary"],         now - timedelta(days=1)),
     ]:
         conn.execute(
-            """INSERT INTO posts (post_id, account_id, engagement_rate, views, likes,
+            """INSERT INTO posts (post_id, client_id, account_id, engagement_rate, views, likes,
                download_status, scraped_at, posted_at, hashtags, mentions, duration_sec)
-               VALUES (?, ?, ?, ?, ?, 'done', ?, ?, ?, [], 30)""",
-            (post_id, acct, eng, views, likes, now, posted, tags)
+               VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, [], 30)""",
+            (post_id, client_id, acct, eng, views, likes, now, posted, tags)
+        )
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+            [client_id, post_id, now],
         )
 
     # message units
