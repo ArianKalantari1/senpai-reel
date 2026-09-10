@@ -3,7 +3,6 @@ import pandas as pd
 
 st.set_page_config(page_title="Analytics", page_icon="📊", layout="wide")
 st.title("📊 Analytics Dashboard")
-st.caption("Creator performance, content topics, gaps, and trends")
 
 try:
     import plotly.express as px
@@ -19,6 +18,13 @@ from analysis.analytics import (
     get_hashtag_intelligence,
 )
 from analysis.taxonomy import TOPICS
+from core.client_context import render_client_selector
+from core.db import init_db
+
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+st.caption(f"Creator performance, content topics, gaps, and trends for {active_client['name']}")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🏆 Leaderboard",
@@ -31,7 +37,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ── Tab 1: Creator Leaderboard ─────────────────────────────────────────────────
 with tab1:
     st.subheader("Creator Leaderboard")
-    df_lb = get_creator_leaderboard(30)
+    df_lb = get_creator_leaderboard(client_id, 30)
     if df_lb.empty:
         st.info("No posts scraped yet.")
     else:
@@ -56,7 +62,7 @@ with tab1:
 # ── Tab 2: Topic Distribution ──────────────────────────────────────────────────
 with tab2:
     st.subheader("Topic Distribution (from extracted knowledge units)")
-    df_topics = get_topic_distribution()
+    df_topics = get_topic_distribution(client_id)
     if df_topics.empty:
         st.info("No knowledge units yet — run extraction pipeline first.")
     else:
@@ -79,7 +85,7 @@ with tab2:
 with tab3:
     st.subheader("Content Gap Map — Topic × Content Type")
     st.caption("Low numbers = opportunity (content type rarely covered for that topic)")
-    pivot = get_content_gap_matrix()
+    pivot = get_content_gap_matrix(client_id)
     if pivot.empty:
         st.info("No knowledge units yet.")
     else:
@@ -100,7 +106,7 @@ with tab3:
 with tab4:
     st.subheader("Top Performing Reels")
     topic_sel = st.selectbox("Filter by topic", ["All"] + TOPICS)
-    df_top = get_top_posts(topic_sel, 50)
+    df_top = get_top_posts(client_id, topic_sel, 50)
     if df_top.empty:
         st.info("No posts yet.")
     else:
@@ -118,7 +124,7 @@ with tab4:
 # ── Tab 5: Hashtags ────────────────────────────────────────────────────────────
 with tab5:
     st.subheader("Hashtag Intelligence")
-    df_ht = get_hashtag_intelligence(40)
+    df_ht = get_hashtag_intelligence(client_id, 40)
     if df_ht.empty:
         st.info("No hashtag data yet.")
     else:

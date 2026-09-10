@@ -1,36 +1,51 @@
 import streamlit as st
-import duckdb
 import pandas as pd
 import json
 from datetime import datetime
 
+from core.client_context import render_client_selector
+from core.db import get_connection, init_db
+
 st.set_page_config(page_title="Data Viewer", page_icon="📊", layout="wide")
 st.title("📊 Data Viewer")
-st.caption("All scraped reels — sorted by engagement rate")
+
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+st.caption(f"Scraped reels for {active_client['name']} — sorted by engagement rate")
 
 
 PAGE_SIZE = 50  # rows per page
 
 
-@st.cache_resource
-def get_conn():
-    return duckdb.connect("reels.duckdb")
-
-
 # ── Sidebar filters ────────────────────────────────────────────────────────────
 st.sidebar.header("🔍 Filters")
 
-conn = get_conn()
+conn = get_connection()
 
 # Account filter — prefer posts table, fall back to raw_scrapes
 try:
     accounts_df = conn.execute(
-        "SELECT DISTINCT account_id as profile FROM posts ORDER BY account_id"
+        """
+        SELECT DISTINCT COALESCE(ca.username, p.account_id) AS profile
+        FROM posts p
+        JOIN client_posts cp ON p.post_id = cp.post_id
+        LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
+        WHERE cp.client_id = ?
+        ORDER BY profile
+        """,
+        [client_id],
     ).df()
     source = "posts"
 except Exception:
     accounts_df = conn.execute(
-        "SELECT DISTINCT profile FROM raw_scrapes ORDER BY profile"
+        """
+        SELECT DISTINCT profile
+        FROM raw_scrapes
+        WHERE client_id = ?
+        ORDER BY profile
+        """,
+        [client_id],
     ).df()
     source = "raw_scrapes"
 
@@ -46,7 +61,7 @@ if "data_page" not in st.session_state:
     st.session_state.data_page = 0
 
 # Reset to page 0 when filters change
-filter_key = f"{selected_account}_{sort_by}"
+filter_key = f"{client_id}_{selected_account}_{sort_by}"
 if st.session_state.get("_last_filter_key") != filter_key:
     st.session_state.data_page = 0
     st.session_state["_last_filter_key"] = filter_key
@@ -54,41 +69,63 @@ if st.session_state.get("_last_filter_key") != filter_key:
 
 # ── Load from posts table (canonical) ─────────────────────────────────────────
 def _total_posts(account_filter):
-    where = "" if account_filter == "All" else f"WHERE account_id = '{account_filter}'"
+    where_clauses = ["cp.client_id = ?"]
+    params = [client_id]
+    if account_filter != "All":
+        where_clauses.append("COALESCE(ca.username, p.account_id) = ?")
+        params.append(account_filter)
+    where = "WHERE " + " AND ".join(where_clauses)
     try:
-        return conn.execute(f"SELECT COUNT(*) FROM posts {where}").fetchone()[0]
+        return conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
+            {where}
+            """,
+            params,
+        ).fetchone()[0]
     except Exception:
         return 0
 
 
 def load_posts(account_filter, order_by, page):
-    where = "" if account_filter == "All" else f"WHERE account_id = '{account_filter}'"
+    where_clauses = ["cp.client_id = ?"]
+    params = [client_id]
+    if account_filter != "All":
+        where_clauses.append("COALESCE(ca.username, p.account_id) = ?")
+        params.append(account_filter)
+    where = "WHERE " + " AND ".join(where_clauses)
     order_col = order_by if order_by in ("engagement_rate", "views", "likes", "posted_at") else "engagement_rate"
     offset = page * PAGE_SIZE
+    params.extend([PAGE_SIZE, offset])
     try:
         df = conn.execute(f"""
             SELECT
-                post_id,
-                account_id,
-                caption,
-                likes,
-                views,
-                comments_count,
-                duration_sec,
-                posted_at,
-                hashtags,
-                mentions,
-                engagement_rate,
-                video_url,
-                thumbnail_url,
-                is_pinned,
-                is_sponsored,
-                download_status
-            FROM posts
+                p.post_id,
+                COALESCE(ca.username, p.account_id) AS account_id,
+                p.caption,
+                p.likes,
+                p.views,
+                p.comments_count,
+                p.duration_sec,
+                p.posted_at,
+                p.hashtags,
+                p.mentions,
+                p.engagement_rate,
+                p.video_url,
+                p.thumbnail_url,
+                p.is_pinned,
+                p.is_sponsored,
+                p.download_status
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
             {where}
             ORDER BY {order_col} DESC NULLS LAST
-            LIMIT {PAGE_SIZE} OFFSET {offset}
-        """).df()
+            LIMIT ? OFFSET ?
+        """, params).df()
         return df, "posts"
     except Exception:
         return pd.DataFrame(), "empty"
@@ -96,12 +133,18 @@ def load_posts(account_filter, order_by, page):
 
 def load_raw_fallback(account_filter, page):
     """Fall back to raw_scrapes if posts table is empty."""
-    where = "" if account_filter == "All" else f"WHERE profile = '{account_filter}'"
+    where_clauses = ["client_id = ?"]
+    params = [client_id]
+    if account_filter != "All":
+        where_clauses.append("profile = ?")
+        params.append(account_filter)
+    where = "WHERE " + " AND ".join(where_clauses)
     offset = page * PAGE_SIZE
+    params.extend([PAGE_SIZE, offset])
     df = conn.execute(f"""
         SELECT profile, raw, scraped_at FROM raw_scrapes
-        {where} ORDER BY scraped_at DESC LIMIT {PAGE_SIZE} OFFSET {offset}
-    """).df()
+        {where} ORDER BY scraped_at DESC LIMIT ? OFFSET ?
+    """, params).df()
     if df.empty:
         return pd.DataFrame()
     rows = []
@@ -136,6 +179,7 @@ with st.spinner("Loading…"):
         source_used = "raw_scrapes (fallback)"
 
 if df.empty and st.session_state.data_page == 0:
+    conn.close()
     st.warning("⚠️ No data yet. Go to the **Scraper** page (home) and run a scrape first.")
     st.stop()
 
@@ -221,3 +265,4 @@ with dl2:
         width="stretch",
     )
 
+conn.close()

@@ -1,6 +1,5 @@
 import streamlit as st
 import json
-import duckdb
 import pandas as pd
 import networkx as nx
 import plotly.graph_objects as go
@@ -9,17 +8,28 @@ from collections import defaultdict, Counter
 import re
 from datetime import datetime
 
+from core.client_context import render_client_selector
+from core.db import get_connection, init_db
+
 st.set_page_config(page_title="Graph Network Analysis", page_icon="🕸️", layout="wide")
 st.title("🕸️ Instagram Content Graph Network")
 st.write("Free graph analysis - discover content relationships and influence patterns without expensive AI APIs")
 
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+
 @st.cache_data
-def build_content_network():
+def build_content_network(client_id):
     """Build the content network graph"""
-    conn = duckdb.connect("reels.duckdb")
+    conn = get_connection()
     
     # Get all posts
-    results = conn.execute("SELECT raw FROM raw_scrapes ORDER BY scraped_at DESC").fetchall()
+    results = conn.execute(
+        "SELECT raw FROM raw_scrapes WHERE client_id = ? ORDER BY scraped_at DESC",
+        [client_id],
+    ).fetchall()
+    conn.close()
     
     posts = []
     graph = nx.Graph()
@@ -247,7 +257,7 @@ def create_network_visualization(graph, posts):
 
 # Main analysis
 with st.spinner("🔗 Building content network graph..."):
-    posts, graph = build_content_network()
+    posts, graph = build_content_network(client_id)
 
 if not posts:
     st.warning("⚠️ No posts found for analysis!")

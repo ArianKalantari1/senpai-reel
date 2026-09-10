@@ -19,7 +19,7 @@ from datetime import datetime
 
 import requests
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class TranscriptResult:
     words: List[WordTimestamp] = field(default_factory=list)
     cost_usd: float = 0.0
     raw_response: dict = field(default_factory=dict)
+    client_id: str = DEFAULT_CLIENT_ID
 
     @property
     def word_count(self) -> int:
@@ -179,10 +180,11 @@ def save_transcript(result: TranscriptResult):
         conn.execute(
             """
             INSERT INTO transcripts (
-                post_id, provider, model, transcript, language,
+                post_id, client_id, provider, model, transcript, language,
                 confidence, duration_sec, word_count, transcribed_at, cost_usd, raw_response
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (post_id) DO UPDATE SET
+                client_id      = COALESCE(transcripts.client_id, excluded.client_id),
                 transcript     = excluded.transcript,
                 provider       = excluded.provider,
                 model          = excluded.model,
@@ -195,6 +197,7 @@ def save_transcript(result: TranscriptResult):
             """,
             [
                 result.post_id,
+                result.client_id,
                 result.provider,
                 result.model,
                 result.transcript,
@@ -211,9 +214,22 @@ def save_transcript(result: TranscriptResult):
         if result.words:
             conn.execute("DELETE FROM transcript_words WHERE post_id = ?", [result.post_id])
             conn.executemany(
-                "INSERT INTO transcript_words VALUES (?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO transcript_words (
+                    client_id, post_id, word_index, word, start_sec, end_sec, confidence
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
                 [
-                    (result.post_id, i, w.word, w.start_sec, w.end_sec, w.confidence)
+                    (
+                        result.client_id,
+                        result.post_id,
+                        i,
+                        w.word,
+                        w.start_sec,
+                        w.end_sec,
+                        w.confidence,
+                    )
                     for i, w in enumerate(result.words)
                 ],
             )
@@ -221,7 +237,12 @@ def save_transcript(result: TranscriptResult):
         conn.close()
 
 
-def transcribe_post(post_id: str, api_key: str, provider: str = "deepgram") -> TranscriptResult:
+def transcribe_post(
+    post_id: str,
+    api_key: str,
+    provider: str = "deepgram",
+    client_id: str = DEFAULT_CLIENT_ID,
+) -> TranscriptResult:
     """
     Fetch audio path from DB, transcribe, and save result.
 
@@ -235,7 +256,13 @@ def transcribe_post(post_id: str, api_key: str, provider: str = "deepgram") -> T
     """
     conn = get_connection()
     row = conn.execute(
-        "SELECT local_audio_path FROM posts WHERE post_id = ?", [post_id]
+        """
+        SELECT p.local_audio_path
+        FROM posts p
+        JOIN client_posts cp ON p.post_id = cp.post_id
+        WHERE p.post_id = ? AND cp.client_id = ?
+        """,
+        [post_id, client_id],
     ).fetchone()
     conn.close()
 
@@ -247,5 +274,6 @@ def transcribe_post(post_id: str, api_key: str, provider: str = "deepgram") -> T
         DeepgramTranscriber(api_key) if provider == "deepgram" else WhisperTranscriber(api_key)
     )
     result = transcriber.transcribe(audio_path, post_id)
+    result.client_id = client_id
     save_transcript(result)
     return result

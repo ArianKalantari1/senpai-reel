@@ -16,7 +16,7 @@ from typing import List, Optional
 
 import requests
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 from analysis.taxonomy import (
     TOPICS,
     CONTENT_TYPES,
@@ -74,6 +74,7 @@ class MessageUnit:
     source_end: Optional[float] = None
     extracted_at: Optional[datetime] = None
     model: str = "gpt-4o-mini"
+    client_id: str = DEFAULT_CLIENT_ID
 
 
 def extract_message_units(
@@ -153,7 +154,7 @@ def extract_message_units(
     return units, round(cost, 6)
 
 
-def save_message_units(units: List[MessageUnit]):
+def save_message_units(units: List[MessageUnit], client_id: str = DEFAULT_CLIENT_ID):
     """Persist extracted message units to DB."""
     if not units:
         return
@@ -162,14 +163,21 @@ def save_message_units(units: List[MessageUnit]):
         conn.executemany(
             """
             INSERT INTO message_units (
-                unit_id, post_id, text, claim, advice, topic, subtopic,
+                unit_id, client_id, post_id, text, claim, advice, topic, subtopic,
                 content_type, confidence, extracted_at, model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (unit_id) DO NOTHING
             """,
             [
                 (
-                    u.unit_id, u.post_id, u.text, u.claim, u.advice, u.topic, u.subtopic,
+                    u.unit_id,
+                    getattr(u, "client_id", None) or client_id,
+                    u.post_id,
+                    u.text,
+                    u.claim,
+                    u.advice,
+                    u.topic,
+                    u.subtopic,
                     u.content_type, u.confidence, u.extracted_at, u.model,
                 )
                 for u in units

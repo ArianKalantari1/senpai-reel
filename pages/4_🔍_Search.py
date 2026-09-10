@@ -3,19 +3,40 @@ import pandas as pd
 
 st.set_page_config(page_title="Semantic Search", page_icon="🔍", layout="wide")
 st.title("🔍 Semantic Search")
-st.caption("Search across all extracted knowledge units by meaning, not just keywords")
 
 from analysis.taxonomy import TOPICS, CONTENT_TYPES
 from analysis.search import semantic_search, keyword_search
-from core.db import get_connection
+from core.client_context import render_client_selector
+from core.db import get_connection, init_db
 
 
-def _unit_count() -> int:
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+st.caption(f"Search {active_client['name']}'s extracted knowledge units by meaning, not just keywords")
+
+
+def _unit_count(client_id: str) -> int:
     try:
         conn = get_connection()
-        total = conn.execute("SELECT COUNT(*) FROM message_units").fetchone()[0]
+        total = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM message_units mu
+            JOIN client_posts cp ON mu.post_id = cp.post_id
+            WHERE cp.client_id = ?
+            """,
+            [client_id],
+        ).fetchone()[0]
         embedded = conn.execute(
-            "SELECT COUNT(*) FROM message_units WHERE embedding IS NOT NULL"
+            """
+            SELECT COUNT(*)
+            FROM message_units mu
+            JOIN client_posts cp ON mu.post_id = cp.post_id
+            WHERE cp.client_id = ?
+              AND mu.embedding IS NOT NULL
+            """,
+            [client_id],
         ).fetchone()[0]
         conn.close()
         return total, embedded
@@ -23,7 +44,7 @@ def _unit_count() -> int:
         return 0, 0
 
 
-total_units, embedded_units = _unit_count()
+total_units, embedded_units = _unit_count(client_id)
 
 c1, c2 = st.columns(2)
 c1.metric("Total Knowledge Units", total_units)
@@ -66,9 +87,9 @@ else:
 if query.strip():
     with st.spinner("Searching…"):
         if search_mode == "semantic":
-            results = semantic_search(query, openai_key, topic_filter, ct_filter, top_k)
+            results = semantic_search(query, openai_key, client_id, topic_filter, ct_filter, top_k)
         else:
-            results = keyword_search(query, topic_filter, top_k)
+            results = keyword_search(query, client_id, topic_filter, top_k, ct_filter)
 
     if not results:
         st.info("No results found. Try a different query or remove filters.")
@@ -83,7 +104,7 @@ if query.strip():
                 if st.button("▶️ Embed pending units"):
                     from analysis.embeddings import embed_pending_units
                     with st.spinner("Embedding…"):
-                        r = embed_pending_units(openai_key, batch_size=50)
+                        r = embed_pending_units(openai_key, batch_size=50, client_id=client_id)
                     st.success(f"Done — {r['done']} embedded, {r['failed']} failed")
                     st.rerun()
             elif not openai_key:
@@ -124,7 +145,7 @@ else:
             if st.button("▶️ Embed pending units"):
                 from analysis.embeddings import embed_pending_units
                 with st.spinner("Embedding…"):
-                    r = embed_pending_units(openai_key, batch_size=50)
+                    r = embed_pending_units(openai_key, batch_size=50, client_id=client_id)
                 st.success(f"Done — {r['done']} embedded, {r['failed']} failed")
                 st.rerun()
         elif not openai_key:
@@ -153,7 +174,7 @@ with st.expander("⚙️ Run Extraction Queue (Phase 4)"):
             else:
                 status.info(f"✅ {done}/{total} — {n_units} units from `{post_id}`")
 
-        result = run_extraction_queue(openai_key2, batch, _cb)
+        result = run_extraction_queue(openai_key2, batch, _cb, client_id)
         status.empty()
         prog.empty()
         st.success(

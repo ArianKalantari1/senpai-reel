@@ -8,9 +8,12 @@ import cv2
 import tempfile
 import subprocess
 
+from core.db import DEFAULT_CLIENT_ID
+
 class VideoAIAnalyzer:
-    def __init__(self, db_path="reels.duckdb"):
+    def __init__(self, db_path="reels.duckdb", client_id=None):
         self.conn = duckdb.connect(db_path)
+        self.client_id = client_id or os.getenv("SENPAI_CLIENT_ID", DEFAULT_CLIENT_ID)
         self.downloads_path = "downloads"
         self.analysis_path = "ai_analysis"
         
@@ -18,6 +21,7 @@ class VideoAIAnalyzer:
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS video_analysis (
                 id INTEGER PRIMARY KEY,
+                client_id VARCHAR,
                 short_code VARCHAR,
                 video_filepath VARCHAR,
                 analysis_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -49,6 +53,14 @@ class VideoAIAnalyzer:
                 processing_time_seconds FLOAT
             )
         """)
+        try:
+            self.conn.execute("ALTER TABLE video_analysis ADD COLUMN client_id VARCHAR")
+            self.conn.execute(
+                "UPDATE video_analysis SET client_id = ? WHERE client_id IS NULL",
+                [DEFAULT_CLIENT_ID],
+            )
+        except Exception:
+            pass
         
         os.makedirs(self.analysis_path, exist_ok=True)
     
@@ -177,10 +189,10 @@ class VideoAIAnalyzer:
         
         # Get metadata from database
         metadata_result = self.conn.execute("""
-            SELECT raw FROM raw_scrapes 
-            WHERE raw LIKE ? 
+            SELECT raw FROM raw_scrapes
+            WHERE client_id = ? AND raw LIKE ?
             LIMIT 1
-        """, [f'%{short_code}%']).fetchone()
+        """, [self.client_id, f'%{short_code}%']).fetchone()
         
         metadata = {}
         if metadata_result:
@@ -212,12 +224,13 @@ class VideoAIAnalyzer:
         # Store results in database
         self.conn.execute("""
             INSERT INTO video_analysis (
-                short_code, video_filepath, scene_description, 
+                client_id, short_code, video_filepath, scene_description,
                 object_detection, text_extraction, content_category,
                 engagement_prediction, ai_model_used, confidence_score,
                 processing_time_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
+            self.client_id,
             short_code,
             video_filepath,
             analysis.get('scene_description', ''),
@@ -271,9 +284,10 @@ class VideoAIAnalyzer:
                 COUNT(*) as category_count,
                 AVG(processing_time_seconds) as avg_processing_time
             FROM video_analysis 
+            WHERE client_id = ?
             GROUP BY content_category
             ORDER BY category_count DESC
-        """).fetchall()
+        """, [self.client_id]).fetchall()
         
         print("\n📊 AI Analysis Insights:")
         print("=" * 50)

@@ -132,12 +132,17 @@ class TestEmbedPendingUnits:
 
         conn = duckdb.connect(embed_db.DB_PATH)
         now = datetime.utcnow()
+        client_id = embed_db.DEFAULT_CLIENT_ID
         for i in range(3):
+            conn.execute(
+                "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+                [client_id, f"post_{i}", now],
+            )
             conn.execute("""
-                INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
+                INSERT INTO message_units (unit_id, client_id, post_id, text, claim, topic, content_type,
                     confidence, extracted_at, model)
-                VALUES (?, ?, ?, ?, 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
-            """, (str(uuid.uuid4()), f"post_{i}", f"text {i}", f"claim {i}", now))
+                VALUES (?, ?, ?, ?, ?, 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
+            """, (str(uuid.uuid4()), client_id, f"post_{i}", f"text {i}", f"claim {i}", now))
         conn.close()
 
         mock_resp = MagicMock()
@@ -157,11 +162,16 @@ class TestEmbedPendingUnits:
 
         conn = duckdb.connect(embed_db.DB_PATH)
         now = datetime.utcnow()
+        client_id = embed_db.DEFAULT_CLIENT_ID
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, 'post_err', ?)",
+            [client_id, now],
+        )
         conn.execute("""
-            INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
+            INSERT INTO message_units (unit_id, client_id, post_id, text, claim, topic, content_type,
                 confidence, extracted_at, model)
-            VALUES (?, 'post_err', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
-        """, (str(uuid.uuid4()), now))
+            VALUES (?, ?, 'post_err', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
+        """, (str(uuid.uuid4()), client_id, now))
         conn.close()
 
         mock_resp = MagicMock()
@@ -179,11 +189,16 @@ class TestEmbedPendingUnits:
 
         conn = duckdb.connect(embed_db.DB_PATH)
         now = datetime.utcnow()
+        client_id = embed_db.DEFAULT_CLIENT_ID
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, 'post_cb', ?)",
+            [client_id, now],
+        )
         conn.execute("""
-            INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
+            INSERT INTO message_units (unit_id, client_id, post_id, text, claim, topic, content_type,
                 confidence, extracted_at, model)
-            VALUES (?, 'post_cb', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
-        """, (str(uuid.uuid4()), now))
+            VALUES (?, ?, 'post_cb', 'text', 'claim', 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
+        """, (str(uuid.uuid4()), client_id, now))
         conn.close()
 
         mock_resp = MagicMock()

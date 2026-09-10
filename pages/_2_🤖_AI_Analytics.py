@@ -1,20 +1,26 @@
 import streamlit as st
-import duckdb
 import pandas as pd
 import json
 from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 
+from core.client_context import render_client_selector
+from core.db import get_connection, init_db
+
 st.set_page_config(page_title="Analytics", page_icon="🤖", layout="wide")
 
 st.title("AI-Powered Analytics")
 st.write("Advanced analytics and insights from your Instagram reel data")
 
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+
 # Database connection
 @st.cache_resource
 def get_db_connection():
-    return duckdb.connect("reels.duckdb")
+    return get_connection()
 
 def load_data(query, params=None):
     conn = get_db_connection()
@@ -25,7 +31,10 @@ def load_data(query, params=None):
 
 # Check if we have data
 try:
-    reels_count = load_data("SELECT COUNT(*) as count FROM reels").iloc[0]['count']
+    reels_count = load_data(
+        "SELECT COUNT(*) as count FROM reels WHERE client_id = ?",
+        [client_id],
+    ).iloc[0]['count']
     if reels_count == 0:
         st.warning("⚠️ No processed reels found. Please scrape some data and process it first.")
         st.stop()
@@ -37,7 +46,10 @@ except:
 st.sidebar.header("🔧 Analytics Options")
 
 try:
-    profiles_df = load_data("SELECT DISTINCT profile FROM reels ORDER BY profile")
+    profiles_df = load_data(
+        "SELECT DISTINCT profile FROM reels WHERE client_id = ? ORDER BY profile",
+        [client_id],
+    )
     available_profiles = ['All'] + profiles_df['profile'].tolist() if not profiles_df.empty else ['All']
 except:
     available_profiles = ['All']
@@ -56,9 +68,9 @@ with tab1:
             SELECT reel_id, shortcode, caption, likes, views, video_play_count, 
                    comments_count, duration, timestamp, is_pinned
             FROM reels 
-            WHERE likes IS NOT NULL AND views IS NOT NULL
+            WHERE client_id = ? AND likes IS NOT NULL AND views IS NOT NULL
         """
-        params = []
+        params = [client_id]
         if selected_profile != 'All':
             query += " AND profile = ?"
             params.append(selected_profile)
@@ -145,9 +157,9 @@ with tab2:
                    EXTRACT(DOW FROM timestamp) as day_of_week,
                    EXTRACT(MONTH FROM timestamp) as month
             FROM reels 
-            WHERE timestamp IS NOT NULL AND likes IS NOT NULL
+            WHERE client_id = ? AND timestamp IS NOT NULL AND likes IS NOT NULL
         """
-        params = []
+        params = [client_id]
         if selected_profile != 'All':
             query += " AND profile = ?"
             params.append(selected_profile)
@@ -228,10 +240,11 @@ with tab3:
                    r.likes as reel_likes, r.views, r.shortcode, r.profile
             FROM comments c
             JOIN reels r ON c.reel_id = r.reel_id
+            WHERE c.client_id = ? AND r.client_id = ?
         """
-        params = []
+        params = [client_id, client_id]
         if selected_profile != 'All':
-            comments_query += " WHERE r.profile = ?"
+            comments_query += " AND r.profile = ?"
             params.append(selected_profile)
             
         comments_data = load_data(comments_query, params)
@@ -283,10 +296,11 @@ with tab4:
             SELECT t.username, t.full_name, r.profile, r.shortcode, r.likes, r.views
             FROM tagged_users t
             JOIN reels r ON t.reel_id = r.reel_id
+            WHERE t.client_id = ? AND r.client_id = ?
         """
-        params = []
+        params = [client_id, client_id]
         if selected_profile != 'All':
-            tagging_query += " WHERE r.profile = ?"
+            tagging_query += " AND r.profile = ?"
             params.append(selected_profile)
             
         tagging_data = load_data(tagging_query, params)
@@ -354,9 +368,9 @@ try:
             AVG(comments_count) as avg_comments,
             AVG(duration) as avg_duration
         FROM reels
-        WHERE likes IS NOT NULL AND views IS NOT NULL
+        WHERE client_id = ? AND likes IS NOT NULL AND views IS NOT NULL
     """
-    params = []
+    params = [client_id]
     if selected_profile != 'All':
         summary_query += " AND profile = ?"
         params.append(selected_profile)

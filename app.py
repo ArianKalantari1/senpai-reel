@@ -1,6 +1,4 @@
 import streamlit as st
-import json
-import duckdb
 
 # Page configuration
 st.set_page_config(
@@ -9,21 +7,25 @@ st.set_page_config(
     layout="wide"
 )
 
-from core.db import init_db, get_posts_stats, get_scrape_history
+from core.client_context import render_client_selector
+from core.clients import add_client_account, get_accounts_with_limits
+from core.db import init_db, get_connection, get_posts_stats, get_scrape_history
 from collection.scraper import scrape_and_store
-from collection.account_list import COMPETITOR_ACCOUNTS, DEFAULT_MAX_ITEMS
+from collection.account_list import DEFAULT_MAX_ITEMS
 from processing.download import download_pending_posts
 
 # Initialize DB once
 init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
 
 APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 
 st.title("🎥 Senpai Reel — Scraper")
-st.caption("Scrape competitor Instagram reels and store everything in the database.")
+st.caption(f"Scrape competitor Instagram reels for {active_client['name']}.")
 
 # ── Global stats bar ──────────────────────────────────────────────────────────
-stats = get_posts_stats()
+stats = get_posts_stats(client_id)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Posts in DB", f"{stats['total_posts']:,}")
 c2.metric("Creator Accounts", stats['accounts'])
@@ -51,7 +53,8 @@ with tab_single:
         else:
             handle = username.strip().lstrip("@")
             with st.spinner(f"Scraping @{handle}… (10–60 sec)…"):
-                result = scrape_and_store(handle, APIFY_TOKEN, max_items)
+                add_client_account(client_id, handle, max_items=max_items)
+                result = scrape_and_store(handle, APIFY_TOKEN, max_items, client_id)
 
             if result["status"] == "done":
                 st.success(
@@ -63,9 +66,10 @@ with tab_single:
 
 # ── BATCH SCRAPE ──────────────────────────────────────────────────────────────
 with tab_batch:
-    st.write("Scrape all competitor accounts from the curated list, or enter custom handles below.")
+    st.write("Scrape this client's competitor accounts, or enter custom handles below.")
 
-    default_handles = "\n".join(COMPETITOR_ACCOUNTS[:10])
+    client_accounts = get_accounts_with_limits(client_id)
+    default_handles = "\n".join(handle for handle, _ in client_accounts)
     handles_input = st.text_area(
         "Accounts to scrape (one per line)",
         value=default_handles,
@@ -87,7 +91,8 @@ with tab_batch:
 
             for i, handle in enumerate(handles):
                 results_placeholder.info(f"⏳ Scraping @{handle} ({i+1}/{len(handles)})…")
-                result = scrape_and_store(handle, APIFY_TOKEN, batch_max)
+                add_client_account(client_id, handle, max_items=batch_max)
+                result = scrape_and_store(handle, APIFY_TOKEN, batch_max, client_id)
                 results.append(result)
                 progress.progress((i + 1) / len(handles))
 
@@ -114,17 +119,34 @@ with tab_download:
     st.write("Download all pending video files and extract audio for Deepgram transcription.")
 
     # Pending count
-    import duckdb as _ddb
-    _conn = _ddb.connect("reels.duckdb")
+    _conn = get_connection()
     try:
         pending_count = _conn.execute(
-            "SELECT COUNT(*) FROM posts WHERE download_status = 'pending'"
+            """
+            SELECT COUNT(*)
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            WHERE cp.client_id = ? AND p.download_status = 'pending'
+            """,
+            [client_id],
         ).fetchone()[0]
         done_count = _conn.execute(
-            "SELECT COUNT(*) FROM posts WHERE download_status = 'done'"
+            """
+            SELECT COUNT(*)
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            WHERE cp.client_id = ? AND p.download_status = 'done'
+            """,
+            [client_id],
         ).fetchone()[0]
         failed_count = _conn.execute(
-            "SELECT COUNT(*) FROM posts WHERE download_status = 'failed'"
+            """
+            SELECT COUNT(*)
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            WHERE cp.client_id = ? AND p.download_status = 'failed'
+            """,
+            [client_id],
         ).fetchone()[0]
     except Exception:
         pending_count = done_count = failed_count = 0
@@ -156,6 +178,7 @@ with tab_download:
                 _results = download_pending_posts(
                     batch_size=batch_dl_size,
                     progress_callback=_on_progress,
+                    client_id=client_id,
                 )
 
             status_text.empty()
@@ -169,7 +192,7 @@ with tab_download:
 # ── Scrape history ────────────────────────────────────────────────────────────
 st.markdown("---")
 with st.expander("📋 Scrape History (last 20 jobs)"):
-    history = get_scrape_history()
+    history = get_scrape_history(client_id)
     if history:
         import pandas as pd
         df = pd.DataFrame(history, columns=[

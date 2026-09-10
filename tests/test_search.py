@@ -30,6 +30,7 @@ def search_db(tmp_path):
 
     conn = duckdb.connect(db_mod.DB_PATH)
     now = datetime.utcnow()
+    client_id = db_mod.DEFAULT_CLIENT_ID
 
     # Insert two creator accounts and posts first (for JOINs)
     conn.execute(
@@ -37,37 +38,45 @@ def search_db(tmp_path):
         (now, now)
     )
     conn.execute("""
-        INSERT INTO posts (post_id, account_id, engagement_rate, download_status,
+        INSERT INTO posts (post_id, client_id, account_id, engagement_rate, download_status,
                            scraped_at, hashtags, mentions, video_url)
-        VALUES ('post_a', 'acc1', 5.0, 'done', ?, [], [], 'http://vid_a')
-    """, (now,))
+        VALUES ('post_a', ?, 'acc1', 5.0, 'done', ?, [], [], 'http://vid_a')
+    """, (client_id, now))
     conn.execute("""
-        INSERT INTO posts (post_id, account_id, engagement_rate, download_status,
+        INSERT INTO posts (post_id, client_id, account_id, engagement_rate, download_status,
                            scraped_at, hashtags, mentions, video_url)
-        VALUES ('post_b', 'acc1', 3.0, 'done', ?, [], [], 'http://vid_b')
-    """, (now,))
+        VALUES ('post_b', ?, 'acc1', 3.0, 'done', ?, [], [], 'http://vid_b')
+    """, (client_id, now))
+    conn.executemany(
+        "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+        [(client_id, "post_a", now), (client_id, "post_b", now)],
+    )
 
     # Insert message units with embeddings
     uid_a = str(uuid.uuid4())
     uid_b = str(uuid.uuid4())
     conn.execute("""
         INSERT INTO message_units
-            (unit_id, post_id, text, claim, topic, content_type, confidence,
+            (unit_id, client_id, post_id, text, claim, topic, content_type, confidence,
              extracted_at, model, embedding, embedded_at)
-        VALUES (?, 'post_a', 'Resume keyword tips', 'Keywords matter', 'Resume', 'tip',
+        VALUES (?, ?, 'post_a', 'Resume keyword tips', 'Keywords matter', 'Resume', 'tip',
                 0.9, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
-    """, (uid_a, now, vec_a, now))
+    """, (uid_a, client_id, now, vec_a, now))
     conn.execute("""
         INSERT INTO message_units
-            (unit_id, post_id, text, claim, topic, content_type, confidence,
+            (unit_id, client_id, post_id, text, claim, topic, content_type, confidence,
              extracted_at, model, embedding, embedded_at)
-        VALUES (?, 'post_b', 'Interview STAR method', 'Structure your answers', 'Interview', 'tip',
+        VALUES (?, ?, 'post_b', 'Interview STAR method', 'Structure your answers', 'Interview', 'tip',
                 0.85, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
-    """, (uid_b, now, vec_b, now))
+    """, (uid_b, client_id, now, vec_b, now))
 
     conn.close()
-    yield db_mod.DB_PATH, uid_a, uid_b
+    yield db_mod.DB_PATH, uid_a, uid_b, client_id
     db_mod.DB_PATH = old_path
+
+
+def _client_id(search_db):
+    return search_db[3]
 
 
 # ── keyword_search ─────────────────────────────────────────────────────────────
@@ -75,33 +84,40 @@ def search_db(tmp_path):
 class TestKeywordSearch:
     def test_finds_matching_text(self, search_db):
         from analysis.search import keyword_search
-        results = keyword_search("resume")
+        results = keyword_search("resume", _client_id(search_db))
         assert any("Resume" in r.text or "resume" in r.text.lower() for r in results)
 
     def test_no_match_returns_empty(self, search_db):
         from analysis.search import keyword_search
-        results = keyword_search("xyzzy_impossible_match_99")
+        results = keyword_search("xyzzy_impossible_match_99", _client_id(search_db))
         assert results == []
 
     def test_topic_filter_works(self, search_db):
         from analysis.search import keyword_search
-        results = keyword_search("tips", topic_filter="Resume")
+        results = keyword_search("tips", _client_id(search_db), topic_filter="Resume")
         assert all(r.topic == "Resume" for r in results)
 
     def test_top_k_respected(self, search_db):
         from analysis.search import keyword_search
-        results = keyword_search("method", top_k=1)
+        results = keyword_search("method", _client_id(search_db), top_k=1)
         assert len(results) <= 1
 
     def test_result_has_expected_fields(self, search_db):
         from analysis.search import keyword_search, SearchResult
-        results = keyword_search("keyword")
+        results = keyword_search("keyword", _client_id(search_db))
         assert len(results) >= 1
         r = results[0]
         assert isinstance(r, SearchResult)
         assert r.unit_id is not None
         assert r.post_id is not None
         assert r.topic in ("Resume", "Interview", "General")
+
+    def test_missing_client_id_raises(self, search_db):
+        from analysis.search import keyword_search
+        with pytest.raises(TypeError):
+            keyword_search("resume")
+        with pytest.raises(ValueError):
+            keyword_search("resume", "")
 
 
 # ── semantic_search ───────────────────────────────────────────────────────────
@@ -122,7 +138,7 @@ class TestSemanticSearch:
         query_vec = [1.0] + [0.0] * (dim - 1)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("resume tips", "fake_key", top_k=10)
+            results = semantic_search("resume tips", "fake_key", _client_id(search_db), top_k=10)
 
         assert len(results) >= 2
         # First result should be unit A (identical vector → cosine = 1.0)
@@ -136,7 +152,13 @@ class TestSemanticSearch:
         query_vec = [1.0] + [0.0] * (dim - 1)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("anything", "fake_key", topic_filter="Interview", top_k=10)
+            results = semantic_search(
+                "anything",
+                "fake_key",
+                _client_id(search_db),
+                topic_filter="Interview",
+                top_k=10,
+            )
 
         assert all(r.topic == "Interview" for r in results)
 
@@ -147,7 +169,13 @@ class TestSemanticSearch:
         query_vec = [0.5] + [0.5] + [0.0] * (1534)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("test", "k", content_type_filter="tip", top_k=10)
+            results = semantic_search(
+                "test",
+                "k",
+                _client_id(search_db),
+                content_type_filter="tip",
+                top_k=10,
+            )
 
         assert all(r.content_type == "tip" for r in results)
 
@@ -158,7 +186,7 @@ class TestSemanticSearch:
         query_vec = [1.0] + [0.0] * (dim - 1)
 
         with patch("analysis.search.embed_text", return_value=query_vec):
-            results = semantic_search("test", "k", top_k=5)
+            results = semantic_search("test", "k", _client_id(search_db), top_k=5)
 
         for r in results:
             assert isinstance(r, SearchResult)
@@ -174,7 +202,16 @@ class TestSemanticSearch:
 
         dim = 1536
         with patch("analysis.search.embed_text", return_value=[0.0] * dim):
-            results = semantic_search("anything", "key", top_k=5)
+            results = semantic_search("anything", "key", db_mod.DEFAULT_CLIENT_ID, top_k=5)
 
         assert results == []
         db_mod.DB_PATH = old_path
+
+    def test_missing_client_id_raises_before_embedding(self, search_db):
+        from analysis.search import semantic_search
+        with pytest.raises(TypeError):
+            semantic_search("resume", "fake_key")
+        with patch("analysis.search.embed_text") as embed_mock:
+            with pytest.raises(ValueError):
+                semantic_search("resume", "fake_key", "")
+        embed_mock.assert_not_called()

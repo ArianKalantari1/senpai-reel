@@ -5,9 +5,12 @@ import os
 from datetime import datetime
 import re
 
+from core.db import DEFAULT_CLIENT_ID
+
 class VideoDownloader:
-    def __init__(self, db_path="reels.duckdb"):
+    def __init__(self, db_path="reels.duckdb", client_id=None):
         self.conn = duckdb.connect(db_path)
+        self.client_id = client_id or os.getenv("SENPAI_CLIENT_ID", DEFAULT_CLIENT_ID)
         self.download_folder = "downloads"
         os.makedirs(self.download_folder, exist_ok=True)
     
@@ -54,19 +57,16 @@ class VideoDownloader:
     
     def download_videos_from_db(self, profile=None, limit=10):
         """Download videos from database records"""
-        query = "SELECT raw, scraped_at FROM raw_scrapes"
-        params = []
+        query = "SELECT raw, scraped_at FROM raw_scrapes WHERE client_id = ?"
+        params = [self.client_id]
         
         if profile:
-            query += " WHERE profile = ?"
+            query += " AND profile = ?"
             params.append(profile)
         
         query += f" ORDER BY scraped_at DESC LIMIT {limit}"
         
-        if params:
-            results = self.conn.execute(query, params).fetchall()
-        else:
-            results = self.conn.execute(query).fetchall()
+        results = self.conn.execute(query, params).fetchall()
         
         downloaded = []
         

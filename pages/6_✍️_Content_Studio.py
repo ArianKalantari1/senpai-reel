@@ -3,11 +3,16 @@ import pandas as pd
 
 st.set_page_config(page_title="Content Studio", page_icon="✍️", layout="wide")
 st.title("✍️ Content Studio")
-st.caption("Generate Instagram captions, hooks, and scripts grounded in competitor intelligence")
 
-from analysis.taxonomy import TOPICS, CONTENT_TYPES
+from analysis.taxonomy import TOPICS
 from analysis.search import keyword_search, semantic_search
-from core.db import get_connection
+from core.client_context import render_client_selector
+from core.db import get_connection, init_db
+
+init_db()
+active_client = render_client_selector()
+client_id = active_client["client_id"]
+st.caption(f"Generate Instagram captions, hooks, and scripts for {active_client['name']}")
 
 try:
     openai_key = st.secrets.get("OPENAI_API_KEY", "")
@@ -42,9 +47,15 @@ selected_units = []
 
 if ref_search:
     try:
-        results = semantic_search(ref_search, openai_key, topic, top_k=10)
+        results = semantic_search(
+            ref_search,
+            openai_key,
+            client_id,
+            topic_filter=topic,
+            top_k=10,
+        )
     except Exception:
-        results = keyword_search(ref_search, topic, 10)
+        results = keyword_search(ref_search, client_id, topic, 10)
 
     if results:
         st.write(f"Found {len(results)} insights — select which to use as reference:")
@@ -77,7 +88,15 @@ with gen_caption_tab:
         with st.spinner("Generating caption…"):
             from analysis.content_gen import generate_caption
             try:
-                result = generate_caption(topic, angle or topic, tone, selected_units, openai_key)
+                result = generate_caption(
+                    topic,
+                    angle or topic,
+                    tone,
+                    selected_units,
+                    openai_key,
+                    client_id,
+                    active_client,
+                )
                 st.success(f"Generated! (${result.cost_usd:.4f}, {result.tokens_used} tokens)")
                 st.text_area("Caption", value=result.output_text, height=300, key="caption_output")
                 st.caption(f"Saved to DB — ID: `{result.gen_id}`")
@@ -92,7 +111,15 @@ with gen_hooks_tab:
         with st.spinner("Generating hooks…"):
             from analysis.content_gen import generate_hooks
             try:
-                result = generate_hooks(topic, angle or topic, selected_units, openai_key, hook_count)
+                result = generate_hooks(
+                    topic,
+                    angle or topic,
+                    selected_units,
+                    openai_key,
+                    hook_count,
+                    client_id,
+                    active_client,
+                )
                 st.success(f"Generated! (${result.cost_usd:.4f})")
                 st.text_area("Hooks", value=result.output_text, height=250, key="hooks_output")
                 st.caption(f"Saved — ID: `{result.gen_id}`")
@@ -110,7 +137,15 @@ with gen_script_tab:
         with st.spinner("Generating script…"):
             from analysis.content_gen import generate_script
             try:
-                result = generate_script(topic, duration_sec, tone, selected_units, openai_key)
+                result = generate_script(
+                    topic,
+                    duration_sec,
+                    tone,
+                    selected_units,
+                    openai_key,
+                    client_id,
+                    active_client,
+                )
                 st.success(f"Generated! (${result.cost_usd:.4f})")
                 st.text_area("Script", value=result.output_text, height=400, key="script_output")
                 st.caption(f"Saved — ID: `{result.gen_id}`")
@@ -127,9 +162,11 @@ with history_tab:
             SELECT gen_id, created_at, topic, content_type,
                    LEFT(output_text, 100) AS preview, model, tokens_used, cost_usd
             FROM generated_content
+            WHERE client_id = ?
             ORDER BY created_at DESC
             LIMIT 50
-            """
+            """,
+            [client_id],
         ).df()
     except Exception:
         df = pd.DataFrame()
@@ -151,7 +188,8 @@ with history_tab:
         if selected_id:
             conn2 = get_connection()
             row = conn2.execute(
-                "SELECT output_text FROM generated_content WHERE gen_id = ?", [selected_id]
+                "SELECT output_text FROM generated_content WHERE gen_id = ? AND client_id = ?",
+                [selected_id, client_id],
             ).fetchone()
             conn2.close()
             if row:

@@ -12,15 +12,23 @@ from graph.video_graph_builder import VideoGraphBuilder
 from graph.video_graph_query_engine import VideoGraphQueryEngine
 import pandas as pd
 
+from core.db import DEFAULT_CLIENT_ID
+
 class InstagramVideoGraphIntegrator:
     """
     Integrates Instagram video analysis with graph-based representation
     Converts scraped Instagram videos into queryable graph networks
     """
     
-    def __init__(self, duckdb_path="reels.duckdb", graph_db_path="video_graphs.db"):
+    def __init__(
+        self,
+        duckdb_path="reels.duckdb",
+        graph_db_path="video_graphs.db",
+        client_id=DEFAULT_CLIENT_ID,
+    ):
         self.duckdb_path = duckdb_path
         self.graph_db_path = graph_db_path
+        self.client_id = client_id
         self.duckdb_conn = duckdb.connect(duckdb_path)
         
         # Initialize graph builder and query engine
@@ -33,7 +41,8 @@ class InstagramVideoGraphIntegrator:
         SELECT r.post_id, r.post_url, r.video_url, r.caption, r.like_count, r.play_count,
                r.music_info, r.duration, r.hashtags
         FROM reels r
-        WHERE r.video_url IS NOT NULL 
+        WHERE r.client_id = ?
+          AND r.video_url IS NOT NULL
           AND r.video_url != ''
           AND r.post_id NOT IN (
               SELECT DISTINCT video_id FROM video_analysis 
@@ -43,7 +52,7 @@ class InstagramVideoGraphIntegrator:
         LIMIT ?
         """
         
-        result = self.duckdb_conn.execute(query, [limit]).fetchdf()
+        result = self.duckdb_conn.execute(query, [self.client_id, limit]).fetchdf()
         return result
     
     def download_instagram_video(self, post_url, output_dir="downloads"):

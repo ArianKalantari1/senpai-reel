@@ -19,16 +19,33 @@ def mem_conn():
 def _create_all_tables(conn: duckdb.DuckDBPyConnection):
     """Create the full schema that matches core/db.py init_db()."""
     conn.execute("""
+    CREATE TABLE IF NOT EXISTS clients (
+        client_id TEXT PRIMARY KEY, name TEXT NOT NULL, niche TEXT,
+        created_at TIMESTAMP, notes TEXT, brand_voice_notes TEXT,
+        target_audience TEXT
+    )""")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS client_accounts (
+        client_id TEXT, instagram_handle TEXT, category TEXT,
+        added_at TIMESTAMP, max_items INTEGER DEFAULT 30,
+        PRIMARY KEY (client_id, instagram_handle)
+    )""")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS client_posts (
+        client_id TEXT, post_id TEXT, added_at TIMESTAMP,
+        PRIMARY KEY (client_id, post_id)
+    )""")
+    conn.execute("""
     CREATE TABLE IF NOT EXISTS profiles (
-        profile TEXT, scraped_at TIMESTAMP, total_reels INTEGER
+        client_id TEXT, profile TEXT, scraped_at TIMESTAMP, total_reels INTEGER
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS raw_scrapes (
-        id INTEGER, profile TEXT, raw JSON, scraped_at TIMESTAMP
+        client_id TEXT, id INTEGER, profile TEXT, raw JSON, scraped_at TIMESTAMP
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS reels (
-        reel_id TEXT PRIMARY KEY, profile TEXT, shortcode TEXT, caption TEXT,
+        reel_id TEXT PRIMARY KEY, client_id TEXT, profile TEXT, shortcode TEXT, caption TEXT,
         likes INTEGER, views INTEGER, video_play_count INTEGER,
         comments_count INTEGER, video_url TEXT, audio_url TEXT,
         thumbnail_url TEXT, display_url TEXT, all_images JSON,
@@ -38,12 +55,12 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS comments (
-        reel_id TEXT, comment_id TEXT, parent_id TEXT, username TEXT,
+        client_id TEXT, reel_id TEXT, comment_id TEXT, parent_id TEXT, username TEXT,
         text TEXT, likes INTEGER, timestamp TIMESTAMP
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS tagged_users (
-        reel_id TEXT, username TEXT, full_name TEXT,
+        client_id TEXT, reel_id TEXT, username TEXT, full_name TEXT,
         user_id TEXT, profile_pic_url TEXT
     )""")
     conn.execute("""
@@ -56,7 +73,7 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS posts (
-        post_id TEXT PRIMARY KEY, account_id TEXT, caption TEXT,
+        post_id TEXT PRIMARY KEY, client_id TEXT, account_id TEXT, caption TEXT,
         caption_clean TEXT, hashtags TEXT[], mentions TEXT[],
         likes INTEGER DEFAULT 0, views INTEGER DEFAULT 0,
         comments_count INTEGER DEFAULT 0, duration_sec DOUBLE DEFAULT 0,
@@ -69,27 +86,27 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS scrape_jobs (
-        job_id TEXT PRIMARY KEY, username TEXT, started_at TIMESTAMP,
+        job_id TEXT PRIMARY KEY, client_id TEXT, username TEXT, started_at TIMESTAMP,
         finished_at TIMESTAMP, reels_found INTEGER DEFAULT 0,
         reels_new INTEGER DEFAULT 0, status TEXT DEFAULT 'running',
         error_msg TEXT
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS transcripts (
-        post_id TEXT PRIMARY KEY, provider TEXT, model TEXT, transcript TEXT,
+        post_id TEXT PRIMARY KEY, client_id TEXT, provider TEXT, model TEXT, transcript TEXT,
         language TEXT, confidence DOUBLE, duration_sec DOUBLE, word_count INTEGER,
         transcribed_at TIMESTAMP, cost_usd DOUBLE, raw_response JSON,
         extraction_cost_usd DOUBLE
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS transcript_words (
-        post_id TEXT, word_index INTEGER, word TEXT,
+        client_id TEXT, post_id TEXT, word_index INTEGER, word TEXT,
         start_sec DOUBLE, end_sec DOUBLE, confidence DOUBLE,
         PRIMARY KEY (post_id, word_index)
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS message_units (
-        unit_id TEXT PRIMARY KEY, post_id TEXT, text TEXT, claim TEXT,
+        unit_id TEXT PRIMARY KEY, client_id TEXT, post_id TEXT, text TEXT, claim TEXT,
         advice TEXT, topic TEXT, subtopic TEXT, content_type TEXT,
         confidence DOUBLE, source_start DOUBLE, source_end DOUBLE,
         extracted_at TIMESTAMP, model TEXT,
@@ -97,7 +114,7 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS generated_content (
-        gen_id TEXT PRIMARY KEY, created_at TIMESTAMP, topic TEXT,
+        gen_id TEXT PRIMARY KEY, client_id TEXT, created_at TIMESTAMP, topic TEXT,
         content_type TEXT, output_text TEXT, model TEXT,
         source_units TEXT[], tokens_used INTEGER, cost_usd DOUBLE
     )""")

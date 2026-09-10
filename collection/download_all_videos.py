@@ -5,8 +5,11 @@ import os
 import subprocess
 import sys
 
-def download_all_videos():
+from core.db import DEFAULT_CLIENT_ID
+
+def download_all_videos(client_id=None):
     """Download all Instagram videos from the database using yt-dlp"""
+    client_id = client_id or os.getenv("SENPAI_CLIENT_ID", DEFAULT_CLIENT_ID)
     
     # Connect to database
     conn = duckdb.connect("reels.duckdb")
@@ -17,8 +20,9 @@ def download_all_videos():
     # Get all post URLs
     results = conn.execute("""
         SELECT raw FROM raw_scrapes 
+        WHERE client_id = ?
         ORDER BY scraped_at DESC
-    """).fetchall()
+    """, [client_id]).fetchall()
     
     videos_to_download = []
     

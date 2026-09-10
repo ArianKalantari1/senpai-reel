@@ -1,9 +1,16 @@
 import json
 import duckdb
+import os
+
+from core.db import DEFAULT_CLIENT_ID
 
 # Connect to database and get all Instagram post URLs
 conn = duckdb.connect("reels.duckdb")
-results = conn.execute("SELECT raw FROM raw_scrapes ORDER BY scraped_at DESC").fetchall()
+client_id = os.getenv("SENPAI_CLIENT_ID", DEFAULT_CLIENT_ID)
+results = conn.execute(
+    "SELECT raw FROM raw_scrapes WHERE client_id = ? ORDER BY scraped_at DESC",
+    [client_id],
+).fetchall()
 
 print("📋 Instagram Post URLs for Manual Download")
 print("=" * 60)

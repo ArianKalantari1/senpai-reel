@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import List, Tuple, Optional
 
 from core.db import (
+    DEFAULT_CLIENT_ID,
     save_raw_scrape,
     upsert_creator_account,
     upsert_post,
@@ -31,6 +32,7 @@ def scrape_account(
     apify_token: str,
     max_items: int = 50,
     retries: int = 2,
+    client_id: str = DEFAULT_CLIENT_ID,
 ) -> Tuple[List[dict], str]:
     """
     Scrape reels for a single Instagram account.
@@ -41,7 +43,7 @@ def scrape_account(
     Raises:
         ScraperError on non-retryable failures.
     """
-    job_id = start_scrape_job(username)
+    job_id = start_scrape_job(username, client_id)
     url = (
         f"https://api.apify.com/v2/acts/{ACTOR_ID}"
         f"/run-sync-get-dataset-items?token={apify_token}"
@@ -83,6 +85,7 @@ def process_and_store(
     username: str,
     items: List[dict],
     job_id: str,
+    client_id: str = DEFAULT_CLIENT_ID,
 ) -> Tuple[int, int]:
     """
     Persist scraped items to DB:
@@ -100,7 +103,7 @@ def process_and_store(
         return 0, 0
 
     # 1. Raw store (deduped)
-    save_raw_scrape(username, items)
+    save_raw_scrape(username, items, client_id)
 
     # 2. Canonical tables
     account_id = None
@@ -110,12 +113,12 @@ def process_and_store(
         if account_id is None:
             account_id = upsert_creator_account(username, item)
 
-        is_new = upsert_post(account_id, item)
+        is_new = upsert_post(account_id, item, client_id)
         if is_new:
             reels_new += 1
 
     # 3. Legacy structured tables (keeps existing pages working)
-    save_structured_scrape(username, items)
+    save_structured_scrape(username, items, client_id)
 
     reels_found = len(items)
     finish_scrape_job(job_id, reels_found, reels_new, "done")
@@ -126,14 +129,15 @@ def scrape_and_store(
     username: str,
     apify_token: str,
     max_items: int = 50,
+    client_id: str = DEFAULT_CLIENT_ID,
 ) -> dict:
     """
     Full pipeline: scrape + store for one account.
     Returns a result dict suitable for display in the UI.
     """
     try:
-        items, job_id = scrape_account(username, apify_token, max_items)
-        reels_found, reels_new = process_and_store(username, items, job_id)
+        items, job_id = scrape_account(username, apify_token, max_items, client_id=client_id)
+        reels_found, reels_new = process_and_store(username, items, job_id, client_id)
         return {
             "username": username,
             "status": "done",

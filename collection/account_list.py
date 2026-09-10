@@ -1,6 +1,7 @@
 """
 Curated list of Jobs-in-Australia competitor Instagram accounts to track.
-Edit this list to add/remove accounts from the scraping target list.
+Kept as seed data for the demo client. Runtime account lists now live in DuckDB
+(`client_accounts`) and are looked up by client_id.
 
 Categories:
   - Resume & Career Coaches
@@ -11,7 +12,7 @@ Categories:
 """
 
 # fmt: off
-COMPETITOR_ACCOUNTS = [
+JOBS_AU_SEED_ACCOUNTS = [
     # ── Resume & Career Coaches ──────────────────────────────────────────────
     "resumeworded",          # AI-powered resume + LinkedIn feedback
     "careersidekick",        # Career advice, job search tips
@@ -47,6 +48,9 @@ COMPETITOR_ACCOUNTS = [
 ]
 # fmt: on
 
+# Backwards compatibility for older scripts/tests that import the original name.
+COMPETITOR_ACCOUNTS = JOBS_AU_SEED_ACCOUNTS
+
 # Default max reels to scrape per account in batch mode
 DEFAULT_MAX_ITEMS = 30
 
@@ -58,9 +62,16 @@ PRIORITY_ACCOUNTS = {
 }
 
 
-def get_accounts_with_limits() -> list[tuple[str, int]]:
-    """Return list of (username, max_items) tuples for batch scraping."""
+def get_accounts_with_limits(client_id: str | None = None) -> list[tuple[str, int]]:
+    """Return (username, max_items) tuples for a client-backed scrape batch."""
+    if client_id:
+        from core.clients import get_accounts_with_limits as _get_client_accounts_with_limits
+
+        rows = _get_client_accounts_with_limits(client_id)
+        if rows:
+            return rows
+
     return [
         (username, PRIORITY_ACCOUNTS.get(username, DEFAULT_MAX_ITEMS))
-        for username in COMPETITOR_ACCOUNTS
+        for username in JOBS_AU_SEED_ACCOUNTS
     ]

@@ -9,7 +9,7 @@ import subprocess
 import logging
 from pathlib import Path
 
-from core.db import get_connection
+from core.db import DEFAULT_CLIENT_ID, get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +72,20 @@ def extract_audio(video_path: str, output_dir: str = "audio_extracts") -> dict:
         return {"success": False, "path": None, "error": "ffmpeg not found — install with: brew install ffmpeg"}
 
 
-def extract_audio_for_post(post_id: str) -> dict:
+def extract_audio_for_post(post_id: str, client_id: str = DEFAULT_CLIENT_ID) -> dict:
     """
     Extract audio for a specific post_id.
     Pulls local_video_path from DB, runs extraction, writes local_audio_path back.
     """
     conn = get_connection()
     row = conn.execute(
-        "SELECT local_video_path, local_audio_path FROM posts WHERE post_id = ?",
-        [post_id],
+        """
+        SELECT p.local_video_path, p.local_audio_path
+        FROM posts p
+        JOIN client_posts cp ON p.post_id = cp.post_id
+        WHERE p.post_id = ? AND cp.client_id = ?
+        """,
+        [post_id, client_id],
     ).fetchone()
     conn.close()
 
@@ -112,7 +117,10 @@ def _update_audio_path(post_id: str, audio_path: str):
         logger.error("Failed to update audio path for %s: %s", post_id, e)
 
 
-def extract_audio_for_downloaded_posts(progress_callback=None) -> dict:
+def extract_audio_for_downloaded_posts(
+    progress_callback=None,
+    client_id: str = DEFAULT_CLIENT_ID,
+) -> dict:
     """
     Extract audio for all posts that are downloaded but missing audio.
 
@@ -122,11 +130,15 @@ def extract_audio_for_downloaded_posts(progress_callback=None) -> dict:
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT post_id, local_video_path FROM posts
-        WHERE download_status = 'done'
-          AND local_video_path IS NOT NULL
-          AND (local_audio_path IS NULL OR local_audio_path = '')
+        SELECT p.post_id, p.local_video_path
+        FROM posts p
+        JOIN client_posts cp ON p.post_id = cp.post_id
+        WHERE cp.client_id = ?
+          AND p.download_status = 'done'
+          AND p.local_video_path IS NOT NULL
+          AND (p.local_audio_path IS NULL OR p.local_audio_path = '')
         """,
+        [client_id],
     ).fetchall()
     conn.close()
 

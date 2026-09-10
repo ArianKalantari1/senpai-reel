@@ -3,6 +3,9 @@ import requests
 import duckdb
 from datetime import datetime
 import concurrent.futures
+import os
+
+from core.db import DEFAULT_CLIENT_ID
 
 def test_url(url_data):
     """Test if a video URL is still valid"""
@@ -13,15 +16,17 @@ def test_url(url_data):
     except:
         return short_code, url, False
 
-def check_existing_urls():
+def check_existing_urls(client_id=None):
     """Check which video URLs from the database still work"""
     conn = duckdb.connect("reels.duckdb")
+    client_id = client_id or os.getenv("SENPAI_CLIENT_ID", DEFAULT_CLIENT_ID)
     
     # Get all video URLs from the database
     results = conn.execute("""
         SELECT raw FROM raw_scrapes 
+        WHERE client_id = ?
         ORDER BY scraped_at DESC
-    """).fetchall()
+    """, [client_id]).fetchall()
     
     url_data = []
     for (raw,) in results:
