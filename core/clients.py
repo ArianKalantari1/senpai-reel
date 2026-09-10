@@ -248,6 +248,26 @@ def delete_client(client_id: str):
             [client_id, client_id, client_id],
         )
 
+        for table in ["transcripts", "transcript_words", "message_units"]:
+            conn.execute(
+                f"""
+                UPDATE {table}
+                SET client_id = (
+                    SELECT MIN(other.client_id)
+                    FROM client_posts other
+                    WHERE other.post_id = {table}.post_id
+                      AND other.client_id != ?
+                )
+                WHERE client_id = ?
+                  AND EXISTS (
+                      SELECT 1 FROM client_posts other
+                      WHERE other.post_id = {table}.post_id
+                        AND other.client_id != ?
+                  )
+                """,
+                [client_id, client_id, client_id],
+            )
+
         for table in [
             "generated_content",
             "scrape_jobs",

@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from core.db import DEFAULT_CLIENT_ID, get_connection
+from core.db import get_connection
 from analysis.embeddings import embed_text
 
 
@@ -28,13 +28,19 @@ class SearchResult:
     posted_at: Optional[str] = None
 
 
+def _require_client_id(client_id: Optional[str]) -> str:
+    if not client_id:
+        raise ValueError("client_id is required")
+    return client_id
+
+
 def semantic_search(
     query: str,
     openai_api_key: str,
+    client_id: str,
     topic_filter: Optional[str] = None,
     content_type_filter: Optional[str] = None,
     top_k: int = 20,
-    client_id: Optional[str] = DEFAULT_CLIENT_ID,
 ) -> List[SearchResult]:
     """
     Search message_units by semantic similarity.
@@ -42,6 +48,7 @@ def semantic_search(
     Args:
         query:                Natural language search query
         openai_api_key:       For embedding the query
+        client_id:            Active client scope
         topic_filter:         Optional topic to restrict search (from taxonomy.TOPICS)
         content_type_filter:  Optional content_type to restrict search
         top_k:                Number of results to return
@@ -49,6 +56,7 @@ def semantic_search(
     Returns:
         List of SearchResult sorted by cosine similarity descending
     """
+    client_id = _require_client_id(client_id)
     query_vec = embed_text(query, openai_api_key)
 
     conn = get_connection()
@@ -64,11 +72,10 @@ def semantic_search(
             where_clauses.append("mu.content_type = ?")
             where_params.append(content_type_filter)
 
-        if client_id:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
-            )
-            where_params.append(client_id)
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
+        )
+        where_params.append(client_id)
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
@@ -122,12 +129,13 @@ def semantic_search(
 
 def keyword_search(
     keyword: str,
+    client_id: str,
     topic_filter: Optional[str] = None,
     top_k: int = 50,
-    client_id: Optional[str] = DEFAULT_CLIENT_ID,
     content_type_filter: Optional[str] = None,
 ) -> List[SearchResult]:
     """Fast keyword search (no embedding needed) — fallback when no API key."""
+    client_id = _require_client_id(client_id)
     conn = get_connection()
     try:
         where_clauses = ["(LOWER(mu.text) LIKE ? OR LOWER(mu.claim) LIKE ?)"]
@@ -141,11 +149,10 @@ def keyword_search(
             where_clauses.append("mu.content_type = ?")
             params.append(content_type_filter)
 
-        if client_id:
-            where_clauses.append(
-                "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
-            )
-            params.append(client_id)
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
+        )
+        params.append(client_id)
 
         where_sql = "WHERE " + " AND ".join(where_clauses)
         params.append(top_k)

@@ -50,12 +50,12 @@ if ref_search:
         results = semantic_search(
             ref_search,
             openai_key,
+            client_id,
             topic_filter=topic,
             top_k=10,
-            client_id=client_id,
         )
     except Exception:
-        results = keyword_search(ref_search, topic, 10, client_id)
+        results = keyword_search(ref_search, client_id, topic, 10)
 
     if results:
         st.write(f"Found {len(results)} insights — select which to use as reference:")

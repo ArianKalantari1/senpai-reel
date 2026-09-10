@@ -36,10 +36,10 @@ No schema reset is required.
 UI pages read the active client from `core.client_context.render_client_selector()`.
 Queries that surface posts, transcripts, message units, analytics, or generated content must filter by the active `client_id`.
 
-For post-derived artifacts, prefer `client_posts` visibility checks over direct `posts.client_id` checks. `posts.client_id`, `transcripts.client_id`, and `message_units.client_id` record the client that first created the artifact, while `client_posts` controls which clients can see it.
+For post-derived artifacts, prefer `client_posts` visibility checks over direct `posts.client_id` checks. `posts.client_id`, `transcripts.client_id`, `transcript_words.client_id`, and `message_units.client_id` record the client that created or inherited the artifact, while `client_posts` controls which clients can see it.
 
 ## Deletion
 
-`core.clients.delete_client()` deletes non-demo client-owned rows and their generated content. Posts and expensive derived artifacts are deleted only when no other client is linked to the post. Shared posts are retained for the remaining clients.
+`core.clients.delete_client()` deletes non-demo client-owned rows and their generated content. Posts and expensive derived artifacts are deleted only when no other client is linked to the post. Shared posts are retained for the remaining clients, and `posts`, `transcripts`, `transcript_words`, and `message_units` ownership is reassigned to a surviving linked client so no artifact rows reference a deleted client.
 
 The seeded demo client is protected because it owns the original corpus.

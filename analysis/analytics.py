@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import pandas as pd
 
-from core.db import DEFAULT_CLIENT_ID, get_connection
+from core.db import get_connection
+
+
+def _require_client_id(client_id: str | None) -> str:
+    if not client_id:
+        raise ValueError("client_id is required")
+    return client_id
 
 
 def _client_scope(alias: str, client_id: str | None, params: list) -> str:
-    if not client_id:
-        return ""
-    params.append(client_id)
+    params.append(_require_client_id(client_id))
     return (
         f"EXISTS (SELECT 1 FROM client_posts cp "
         f"WHERE cp.post_id = {alias}.post_id AND cp.client_id = ?)"
@@ -22,14 +26,14 @@ def _client_scope(alias: str, client_id: str | None, params: list) -> str:
 
 
 def get_creator_leaderboard(
+    client_id: str,
     limit: int = 20,
-    client_id: str | None = DEFAULT_CLIENT_ID,
 ) -> pd.DataFrame:
     conn = get_connection()
     try:
         params = []
         scope = _client_scope("p", client_id, params)
-        where_sql = f"WHERE {scope}" if scope else ""
+        where_sql = f"WHERE {scope}"
         params.append(limit)
         return conn.execute(
             """
@@ -54,12 +58,12 @@ def get_creator_leaderboard(
         conn.close()
 
 
-def get_topic_distribution(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.DataFrame:
+def get_topic_distribution(client_id: str) -> pd.DataFrame:
     conn = get_connection()
     try:
         params = []
         scope = _client_scope("mu", client_id, params)
-        where_sql = f"WHERE {scope}" if scope else ""
+        where_sql = f"WHERE {scope}"
         return conn.execute(
             """
             SELECT mu.topic, COUNT(*) AS unit_count
@@ -74,13 +78,13 @@ def get_topic_distribution(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.Data
         conn.close()
 
 
-def get_content_gap_matrix(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.DataFrame:
+def get_content_gap_matrix(client_id: str) -> pd.DataFrame:
     """Returns a pivot table: topic (rows) × content_type (cols) = unit count."""
     conn = get_connection()
     try:
         params = []
         scope = _client_scope("mu", client_id, params)
-        where_sql = f"WHERE {scope}" if scope else ""
+        where_sql = f"WHERE {scope}"
         df = conn.execute(
             """
             SELECT mu.topic, mu.content_type, COUNT(*) AS cnt
@@ -100,17 +104,16 @@ def get_content_gap_matrix(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.Data
 
 
 def get_top_posts(
+    client_id: str,
     topic: str = "All",
     limit: int = 20,
-    client_id: str | None = DEFAULT_CLIENT_ID,
 ) -> pd.DataFrame:
     conn = get_connection()
     try:
         params = []
         where_clauses = []
         scope = _client_scope("p", client_id, params)
-        if scope:
-            where_clauses.append(scope)
+        where_clauses.append(scope)
         topic_join = ""
         if topic != "All":
             topic_join = "LEFT JOIN message_units mu ON p.post_id = mu.post_id"
@@ -145,17 +148,15 @@ def get_top_posts(
 
 
 def get_hashtag_intelligence(
+    client_id: str,
     limit: int = 30,
-    client_id: str | None = DEFAULT_CLIENT_ID,
 ) -> pd.DataFrame:
     """Most-used hashtags across all posts."""
     conn = get_connection()
     try:
         params = []
         scope = _client_scope("p", client_id, params)
-        where_sql = "WHERE p.hashtags IS NOT NULL"
-        if scope:
-            where_sql += f" AND {scope}"
+        where_sql = f"WHERE p.hashtags IS NOT NULL AND {scope}"
         df = conn.execute(
             f"SELECT p.hashtags FROM posts p {where_sql}",
             params,
@@ -178,15 +179,13 @@ def get_hashtag_intelligence(
     return pd.DataFrame(top, columns=["hashtag", "count"])
 
 
-def get_posting_cadence(client_id: str | None = DEFAULT_CLIENT_ID) -> pd.DataFrame:
+def get_posting_cadence(client_id: str) -> pd.DataFrame:
     """Posts per week per creator."""
     conn = get_connection()
     try:
         params = []
         scope = _client_scope("p", client_id, params)
-        where_clauses = ["p.posted_at IS NOT NULL"]
-        if scope:
-            where_clauses.append(scope)
+        where_clauses = ["p.posted_at IS NOT NULL", scope]
         return conn.execute(
             """
             SELECT

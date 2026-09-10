@@ -37,7 +37,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 # ── Tab 1: Creator Leaderboard ─────────────────────────────────────────────────
 with tab1:
     st.subheader("Creator Leaderboard")
-    df_lb = get_creator_leaderboard(30, client_id)
+    df_lb = get_creator_leaderboard(client_id, 30)
     if df_lb.empty:
         st.info("No posts scraped yet.")
     else:
@@ -106,7 +106,7 @@ with tab3:
 with tab4:
     st.subheader("Top Performing Reels")
     topic_sel = st.selectbox("Filter by topic", ["All"] + TOPICS)
-    df_top = get_top_posts(topic_sel, 50, client_id)
+    df_top = get_top_posts(client_id, topic_sel, 50)
     if df_top.empty:
         st.info("No posts yet.")
     else:
@@ -124,7 +124,7 @@ with tab4:
 # ── Tab 5: Hashtags ────────────────────────────────────────────────────────────
 with tab5:
     st.subheader("Hashtag Intelligence")
-    df_ht = get_hashtag_intelligence(40, client_id)
+    df_ht = get_hashtag_intelligence(client_id, 40)
     if df_ht.empty:
         st.info("No hashtag data yet.")
     else:

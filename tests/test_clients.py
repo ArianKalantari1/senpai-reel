@@ -72,6 +72,15 @@ def test_delete_client_removes_private_data_and_preserves_shared_post(client_db)
         )
         conn.execute(
             """
+            INSERT INTO transcript_words (
+                client_id, post_id, word_index, word, start_sec, end_sec, confidence
+            )
+            VALUES (?, ?, 0, 'hello', 0, 1, 0.9)
+            """,
+            [alpha_id, post_id],
+        )
+        conn.execute(
+            """
             INSERT INTO message_units (
                 unit_id, client_id, post_id, text, claim, topic, content_type,
                 confidence, extracted_at, model
@@ -107,6 +116,18 @@ def test_delete_client_removes_private_data_and_preserves_shared_post(client_db)
     shared_exists = conn.execute(
         "SELECT COUNT(*) FROM posts WHERE post_id = 'shared_post'"
     ).fetchone()[0]
+    shared_post_owner = conn.execute(
+        "SELECT client_id FROM posts WHERE post_id = 'shared_post'"
+    ).fetchone()[0]
+    shared_transcript_owner = conn.execute(
+        "SELECT client_id FROM transcripts WHERE post_id = 'shared_post'"
+    ).fetchone()[0]
+    shared_word_owner = conn.execute(
+        "SELECT client_id FROM transcript_words WHERE post_id = 'shared_post'"
+    ).fetchone()[0]
+    shared_unit_owner = conn.execute(
+        "SELECT client_id FROM message_units WHERE post_id = 'shared_post'"
+    ).fetchone()[0]
     private_exists = conn.execute(
         "SELECT COUNT(*) FROM posts WHERE post_id = 'private_post'"
     ).fetchone()[0]
@@ -121,10 +142,42 @@ def test_delete_client_removes_private_data_and_preserves_shared_post(client_db)
         "SELECT COUNT(*) FROM generated_content WHERE client_id = ?",
         [alpha_id],
     ).fetchone()[0]
+    dangling_client_refs = {}
+    for table in [
+        "client_accounts",
+        "client_posts",
+        "profiles",
+        "raw_scrapes",
+        "reels",
+        "comments",
+        "tagged_users",
+        "posts",
+        "scrape_jobs",
+        "transcripts",
+        "transcript_words",
+        "message_units",
+        "generated_content",
+    ]:
+        count = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM {table} t
+            LEFT JOIN clients c ON t.client_id = c.client_id
+            WHERE t.client_id IS NOT NULL
+              AND c.client_id IS NULL
+            """
+        ).fetchone()[0]
+        if count:
+            dangling_client_refs[table] = count
     conn.close()
 
     assert alpha_exists == 0
     assert shared_exists == 1
+    assert shared_post_owner == beta_id
+    assert shared_transcript_owner == beta_id
+    assert shared_word_owner == beta_id
+    assert shared_unit_owner == beta_id
     assert private_exists == 0
     assert beta_link == 1
     assert generated_exists == 0
+    assert dangling_client_refs == {}

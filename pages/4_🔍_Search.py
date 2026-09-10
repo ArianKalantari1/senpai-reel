@@ -87,9 +87,9 @@ else:
 if query.strip():
     with st.spinner("Searching…"):
         if search_mode == "semantic":
-            results = semantic_search(query, openai_key, topic_filter, ct_filter, top_k, client_id)
+            results = semantic_search(query, openai_key, client_id, topic_filter, ct_filter, top_k)
         else:
-            results = keyword_search(query, topic_filter, top_k, client_id, ct_filter)
+            results = keyword_search(query, client_id, topic_filter, top_k, ct_filter)
 
     if not results:
         st.info("No results found. Try a different query or remove filters.")
