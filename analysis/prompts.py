@@ -90,14 +90,56 @@ Reference insights from top-performing reels on this topic:
 Write the script:"""
 
 
+# Appended to every generation system prompt. Reference units describe what
+# competitors talk about; they are research evidence, not source material.
+# See creative-director-ai #17.
+ORIGINALITY_CONSTRAINT = """
+
+USE OF REFERENCE MATERIAL
+The reference insights below are competitor research. Use them only to
+understand which topics, angles and structures resonate in this market.
+
+- Write every line in your own words.
+- Do not reuse phrases, sentences or distinctive turns of phrase from the references.
+- Do not quote a competitor, name one, or imply endorsement by one.
+- If a reference states a statistic you cannot independently support, do not
+  repeat it as fact.
+
+The output must stand as original writing for this brand.
+"""
+
+
 def format_reference_context(units: list) -> str:
-    """Format a list of SearchResult or MessageUnit objects as context text."""
+    """Format reference units as context text for a generation prompt.
+
+    Uses `claim` (the extractor's own abstraction) rather than `text`
+    (verbatim or closely paraphrased competitor wording). Competitor
+    expression must not reach the generator — see creative-director-ai #17
+    and the strategy-abstraction firewall in the v2 research report.
+
+    `text` is used only when a unit has no `claim` at all, and is truncated
+    hard in that case to limit how much source phrasing can carry through.
+    """
     if not units:
         return "(no reference units selected)"
     lines = []
     for u in units[:8]:  # cap at 8 to stay within token budget
-        text = getattr(u, "text", "") or getattr(u, "claim", "")
+        claim = (getattr(u, "claim", "") or "").strip()
+        if claim:
+            body = claim
+        else:
+            # Fallback only. Truncated because this IS competitor wording.
+            body = (getattr(u, "text", "") or "").strip()[:120]
+        if not body:
+            continue
         topic = getattr(u, "topic", "")
         ct = getattr(u, "content_type", "")
-        lines.append(f"- [{topic}/{ct}] {text}")
+        lines.append(f"- [{topic}/{ct}] {body}")
+    if not lines:
+        return "(no reference units selected)"
     return "\n".join(lines)
+
+
+CAPTION_SYSTEM = CAPTION_SYSTEM + ORIGINALITY_CONSTRAINT
+HOOKS_SYSTEM = HOOKS_SYSTEM + ORIGINALITY_CONSTRAINT
+SCRIPT_SYSTEM = SCRIPT_SYSTEM + ORIGINALITY_CONSTRAINT
