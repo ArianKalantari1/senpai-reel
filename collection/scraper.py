@@ -23,6 +23,7 @@ DB_PATH = "reels.duckdb"
 
 from collection.sources.apify import ApifyError, ApifySource
 from collection.sources.base import ReelRecord
+from core.costs import apify_rate_usd
 
 
 class ScraperError(Exception):
@@ -112,7 +113,10 @@ def process_and_store(
     save_structured_scrape(username, items, client_id)
 
     reels_found = len(items)
-    finish_scrape_job(job_id, reels_found, reels_new, "done")
+    rate = apify_rate_usd()
+    # None when no rate is configured: recorded as unknown, never as zero.
+    cost = round(reels_found * rate, 6) if rate is not None else None
+    finish_scrape_job(job_id, reels_found, reels_new, "done", cost_usd=cost)
     return reels_found, reels_new
 
 

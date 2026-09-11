@@ -387,6 +387,15 @@ def init_db():
     )
     """)
 
+
+    # Apify scrape cost. Recorded per job so per-client totals can include the
+    # acquisition line, which is the largest and was previously untracked.
+    for col, typedef in [("cost_usd", "DOUBLE"), ("billable_results", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE scrape_jobs ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass  # already present
+
     # Idempotent migrations for databases created before Phase 0 multi-client work.
     for col, typedef in [
         ("downloaded_at", "TIMESTAMP"),
@@ -780,14 +789,22 @@ def start_scrape_job(username: str, client_id: str = DEFAULT_CLIENT_ID) -> str:
 
 
 def finish_scrape_job(job_id: str, reels_found: int, reels_new: int,
-                      status: str = "done", error_msg: Optional[str] = None):
-    """Mark a scrape job as finished."""
+                      status: str = "done", error_msg: Optional[str] = None,
+                      cost_usd: Optional[float] = None):
+    """Mark a scrape job as finished.
+
+    cost_usd is None when no Apify rate is configured. That is recorded as
+    unknown rather than zero — an unpriced scrape is not a free one, and the
+    cost meter says so instead of quietly understating the total.
+    """
     conn = duckdb.connect(DB_PATH)
     conn.execute("""
         UPDATE scrape_jobs
-        SET finished_at = ?, reels_found = ?, reels_new = ?, status = ?, error_msg = ?
+        SET finished_at = ?, reels_found = ?, reels_new = ?, status = ?,
+            error_msg = ?, cost_usd = ?, billable_results = ?
         WHERE job_id = ?
-    """, (datetime.utcnow(), reels_found, reels_new, status, error_msg, job_id))
+    """, (datetime.utcnow(), reels_found, reels_new, status, error_msg,
+          cost_usd, reels_found, job_id))
     conn.close()
 
 
