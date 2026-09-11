@@ -1,15 +1,21 @@
-"""
-Phase 4 — Jobs-AU Domain Taxonomy.
+"""Taxonomy: per-persona topics, shared content types.
 
-Defines the canonical topic and content_type values used throughout
-extraction, search, and content generation.
+Topics are **per-client and versioned** — see creative-director-ai #25 and
+`docs/design/persona-discovery.md`. The Jobs-AU lists below are *seed data*
+for the demo client, not the runtime source of truth: a second persona in
+another niche gets its own topics, or everything it says classifies as
+"General".
+
+`content_type` stays shared. It describes the *shape* of an idea (tip,
+warning, stat, myth...) rather than its subject, and shape is
+niche-independent.
 """
 
 from __future__ import annotations
 from typing import Optional
 
 # ── Topics ─────────────────────────────────────────────────────────────────────
-TOPICS = [
+SEED_TOPICS_JOBS_AU = [
     "ATS",
     "Resume",
     "CoverLetter",
@@ -36,7 +42,7 @@ CONTENT_TYPES = [
 ]
 
 # ── Descriptions used in GPT system prompt ────────────────────────────────────
-TOPIC_DESCRIPTIONS = {
+SEED_TOPIC_DESCRIPTIONS_JOBS_AU = {
     "ATS": "Applicant Tracking Systems — keywords, resume parsing, rejection",
     "Resume": "Resume writing, formatting, sections, keywords, length",
     "CoverLetter": "Cover letter strategy, structure, personalisation",
@@ -62,14 +68,6 @@ CONTENT_TYPE_DESCRIPTIONS = {
 }
 
 
-def validate_topic(value: str) -> str:
-    """Normalise and validate a topic string. Returns 'General' if unrecognised."""
-    for t in TOPICS:
-        if t.lower() == value.lower().strip():
-            return t
-    return "General"
-
-
 def validate_content_type(value: str) -> str:
     """Normalise and validate a content_type string. Returns 'other' if unrecognised."""
     for ct in CONTENT_TYPES:
@@ -78,11 +76,26 @@ def validate_content_type(value: str) -> str:
     return "other"
 
 
-def topics_for_prompt() -> str:
-    """Return a formatted string of topics for GPT system prompts."""
-    return "\n".join(f"  - {t}: {TOPIC_DESCRIPTIONS[t]}" for t in TOPICS)
-
-
 def content_types_for_prompt() -> str:
     """Return a formatted string of content types for GPT system prompts."""
     return "\n".join(f"  - {ct}: {CONTENT_TYPE_DESCRIPTIONS[ct]}" for ct in CONTENT_TYPES)
+
+
+# ── Per-client topics ─────────────────────────────────────────────────────────
+# These delegate to core.taxonomy. Imported lazily to avoid a circular import
+# (core.db -> core.clients -> analysis.* in some call paths).
+
+def topics_for_prompt(client_id: str) -> str:
+    """Formatted topic list for this client's active taxonomy."""
+    from core.taxonomy import topics_for_prompt as _impl
+    return _impl(client_id)
+
+
+def validate_topic(client_id: str, value: str):
+    """Resolve a model-produced topic name against this client's active taxonomy.
+
+    Returns (topic_id, name). Falls back to the client's own catch-all rather
+    than a hardcoded "General", because a persona may not have one by that name.
+    """
+    from core.taxonomy import validate_topic as _impl
+    return _impl(client_id, value)
