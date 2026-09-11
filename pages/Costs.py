@@ -16,16 +16,29 @@ def _fmt(usd):
     return "—" if usd is None else f"${usd:,.4f}"
 
 
+def _metric_label(label, complete):
+    return label if complete else f"{label} (partial)"
+
+
 st.subheader(client["name"])
 
 cols = st.columns(4)
-cols[0].metric("This month", _fmt(costs["month_total_usd"]))
-cols[1].metric("All time", _fmt(costs["total_usd"]))
+cols[0].metric(
+    _metric_label("This month", costs["month_total_is_complete"]),
+    _fmt(costs["month_total_usd"]),
+)
+cols[1].metric(
+    _metric_label("All time", costs["total_is_complete"]),
+    _fmt(costs["total_usd"]),
+)
 cols[2].metric(
     "Pieces generated",
     f"{costs['pieces_generated']:,}",
 )
-cols[3].metric("Cost per piece", _fmt(costs["cost_per_piece"]))
+cols[3].metric(
+    _metric_label("Cost per piece", costs["total_is_complete"]),
+    _fmt(costs["cost_per_piece"]),
+)
 
 st.divider()
 
@@ -44,18 +57,22 @@ st.table(rows)
 
 if not costs["total_is_complete"]:
     n = costs["unpriced_scrape_jobs"]
+    month_n = costs["month_unpriced_scrape_jobs"]
+    month_note = f"{month_n} this month, {n} all time"
     if apify_rate_usd() is None:
         st.warning(
-            f"{n} scrape job(s) have no recorded cost because no Apify rate is set. "
-            "The total below understates what this client actually costs.\n\n"
+            f"{n} scrape job(s) have no recorded cost ({month_note}) because "
+            "no Apify rate is set. The partial totals understate what this "
+            "client actually costs.\n\n"
             "Set `APIFY_USD_PER_RESULT` to your plan's effective cost per result. "
             "There is no default: Apify prices in credits and the rate depends on "
             "your plan, so a guessed number would be confidently wrong."
         )
     else:
         st.info(
-            f"{n} scrape job(s) ran before a rate was configured, so their cost is "
-            "unknown. New scrapes are priced from here on."
+            f"{n} scrape job(s) ran before a rate was configured "
+            f"({month_note}), so their cost is unknown. New scrapes are priced "
+            "from here on."
         )
 
 if costs["pieces_generated"] == 0:

@@ -67,9 +67,16 @@ class TestRollup:
     def test_unpriced_scrape_marks_total_incomplete(self, db):
         _seed(db, "c1", scrape_cost=None)
         out = client_costs("c1")
-        assert out["lines"]["scraping"]["known"] is False
+        scraping = out["lines"]["scraping"]
+        assert scraping["known"] is False
+        assert scraping["month_known"] is False
+        assert scraping["usd"] is None
+        assert scraping["all_time_usd"] is None
+        assert scraping["month_usd"] is None
         assert out["total_is_complete"] is False, "an unpriced scrape is not a free scrape"
+        assert out["month_total_is_complete"] is False
         assert out["unpriced_scrape_jobs"] == 1
+        assert out["month_unpriced_scrape_jobs"] == 1
 
     def test_priced_scrape_completes_the_total(self, db):
         _seed(db, "c2", scrape_cost=0.023)
@@ -109,9 +116,29 @@ class TestRollup:
         assert out["month_total_usd"] == pytest.approx(0.10 + 0.05 + 0.011 + 0.002)
         assert out["total_usd"] == pytest.approx(0.30 + 0.10 + 0.022 + 0.004)
 
+    def test_old_unpriced_scrape_does_not_hide_current_month_cost(self, db):
+        now = datetime(2026, 9, 10, 12, 0, 0)
+        old = datetime(2026, 8, 31, 12, 0, 0)
+        _seed(db, "cMixed", scrape_cost=0.10, when=now, suffix="_now")
+        _seed(db, "cMixed", scrape_cost=None, jobs=1, when=old, suffix="_old")
+
+        out = client_costs("cMixed", now=now)
+        scraping = out["lines"]["scraping"]
+
+        assert scraping["known"] is False
+        assert scraping["all_time_usd"] is None
+        assert scraping["month_known"] is True
+        assert scraping["month_usd"] == pytest.approx(0.10)
+        assert out["total_is_complete"] is False
+        assert out["month_total_is_complete"] is True
+        assert out["unpriced_scrape_jobs"] == 1
+        assert out["month_unpriced_scrape_jobs"] == 0
+
     def test_empty_client_is_zero_not_error(self, db):
         out = client_costs("nobody")
         assert out["total_usd"] == 0
+        assert out["lines"]["scraping"]["usd"] == 0
+        assert out["lines"]["scraping"]["month_usd"] == 0
         assert out["reels_analysed"] == 0
 
 

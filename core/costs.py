@@ -84,13 +84,22 @@ def _unpriced_count(conn, sql: str, params: list, since: Optional[datetime] = No
     return int(row[0] or 0)
 
 
-def _line(conn, sql: str, params: list, since: datetime, known: bool = True, month_known: bool = True) -> dict:
+def _line(
+    conn,
+    sql: str,
+    params: list,
+    since: datetime,
+    known: bool = True,
+    month_known: bool = True,
+) -> dict:
     all_time = round(_period_sum(conn, sql, params), 4)
     month = round(_period_sum(conn, sql, params, since), 4)
+    all_time_usd = all_time if known else None
+    month_usd = month if month_known else None
     return {
-        "usd": all_time,
-        "all_time_usd": all_time,
-        "month_usd": month,
+        "usd": all_time_usd,
+        "all_time_usd": all_time_usd,
+        "month_usd": month_usd,
         "known": known,
         "month_known": month_known,
     }
@@ -99,8 +108,11 @@ def _line(conn, sql: str, params: list, since: datetime, known: bool = True, mon
 def client_costs(client_id: str, now: Optional[datetime] = None) -> dict:
     """Cost breakdown for one client.
 
-    Each line carries `usd` (None when genuinely unknown) and `known`, so the
-    UI can distinguish "cost nothing" from "cost not recorded".
+    Each line carries `usd`/`all_time_usd` and `month_usd`. The value is None
+    when the matching `known`/`month_known` flag is false, so the UI can
+    distinguish "cost nothing" from "cost not recorded". Aggregate totals are
+    the known spend so far and should use their `*_is_complete` flags when
+    rendered.
     """
     init_db()
     since = _month_start(now)
