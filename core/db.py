@@ -376,6 +376,17 @@ def init_db():
     )
     """)
 
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS pipeline_locks (
+        lock_name    TEXT PRIMARY KEY,
+        run_id       TEXT,
+        client_id    TEXT,
+        started_at   TIMESTAMP,
+        heartbeat_at TIMESTAMP,
+        stage        TEXT
+    )
+    """)
+
     # Idempotent migrations for databases created before Phase 0 multi-client work.
     for col, typedef in [
         ("downloaded_at", "TIMESTAMP"),
@@ -425,6 +436,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_message_units_post_id ON message_units(post_id)",
         "CREATE INDEX IF NOT EXISTS idx_transcripts_client_id ON transcripts(client_id)",
         "CREATE INDEX IF NOT EXISTS idx_transcripts_post_id ON transcripts(post_id)",
+        "CREATE INDEX IF NOT EXISTS idx_pipeline_locks_client_id ON pipeline_locks(client_id)",
     ]:
         try:
             conn.execute(ddl)

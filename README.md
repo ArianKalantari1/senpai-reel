@@ -398,7 +398,7 @@ Standalone visualiser for a graph stored in `demo_video_graphs.db`. Used by Page
 6. Shows quick stats (reel count, comment count, tagged user count).
 7. Provides a "Download JSON" button for local export.
 
-**Status:** ✅ Fully working. Requires `APIFY_TOKEN` in `.streamlit/secrets.toml`.
+**Status:** ✅ Fully working. Requires `APIFY_TOKEN`; if it is missing, the app shows setup guidance instead of breaking.
 
 ---
 
@@ -408,7 +408,7 @@ A single-line validation page. Confirms the Streamlit multi-page setup is workin
 
 ---
 
-### 6.3 Page 1 — Data Viewer (`pages/1_📊_Data_Viewer.py`)
+### 6.3 Data Viewer (`pages/Data_Viewer.py`)
 
 **What it does:** A rich, filterable, searchable table of all scraped reels.
 
@@ -672,12 +672,14 @@ senpai-reel/
 │   └── secrets.toml                # API keys (APIFY_TOKEN, etc.) — NOT in git
 │
 ├── pages/                          # Streamlit multi-page app pages
-│   ├── 0_🧪_Test.py               # Sanity check page
-│   ├── 1_📊_Data_Viewer.py        # Main data exploration table
-│   ├── 2_🤖_AI_Analytics.py       # Plotly analytics dashboard
-│   ├── 3_🤖_AI_Video_Analysis.py  # Heuristic video analysis (requires downloads)
-│   ├── 4_🕸️_Graph_Network.py     # Content similarity graph
-│   └── 5_🔍_Graph_Query_Engine.py # Frame-level video graph queries
+│   ├── Onboarding.py               # First-run client/account setup
+│   ├── Pipeline.py                 # One-click scrape-to-embeddings pipeline
+│   ├── Settings.py                 # Session-scoped API key setup
+│   ├── Data_Viewer.py              # Main data exploration table
+│   ├── Corpus_Explorer.py          # Transcripts and word timestamps
+│   ├── Search.py                   # Keyword and semantic search
+│   ├── Analytics.py                # Competitor intelligence dashboard
+│   └── Content_Studio.py           # Grounded content generation
 │
 ├── core/
 │   └── db.py                       # All DuckDB table definitions + CRUD functions

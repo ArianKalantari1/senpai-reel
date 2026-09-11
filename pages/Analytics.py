@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="Analytics", page_icon="📊", layout="wide")
-st.title("📊 Analytics Dashboard")
+st.title("Analytics")
 
 try:
     import plotly.express as px
@@ -20,6 +20,7 @@ from analysis.analytics import (
 from analysis.taxonomy import TOPICS
 from core.client_context import render_client_selector
 from core.db import init_db
+from core.navigation import render_page_link
 
 init_db()
 active_client = render_client_selector()
@@ -39,7 +40,8 @@ with tab1:
     st.subheader("Creator Leaderboard")
     df_lb = get_creator_leaderboard(client_id, 30)
     if df_lb.empty:
-        st.info("No posts scraped yet.")
+        st.info("No posts scraped yet. Run stage 1 on the Pipeline page.")
+        render_page_link(st, "Pipeline.py", "Open Pipeline")
     else:
         if HAS_PLOTLY:
             fig = px.bar(
@@ -64,7 +66,8 @@ with tab2:
     st.subheader("Topic Distribution (from extracted knowledge units)")
     df_topics = get_topic_distribution(client_id)
     if df_topics.empty:
-        st.info("No knowledge units yet — run extraction pipeline first.")
+        st.info("No knowledge units yet. Run stage 4 on the Pipeline page after transcription.")
+        render_page_link(st, "Pipeline.py", "Open Pipeline")
     else:
         col_pie, col_bar = st.columns(2)
         if HAS_PLOTLY:
@@ -87,7 +90,8 @@ with tab3:
     st.caption("Low numbers = opportunity (content type rarely covered for that topic)")
     pivot = get_content_gap_matrix(client_id)
     if pivot.empty:
-        st.info("No knowledge units yet.")
+        st.info("No knowledge units yet. Run stage 4 on the Pipeline page after transcription.")
+        render_page_link(st, "Pipeline.py", "Open Pipeline")
     else:
         if HAS_PLOTLY:
             fig_heat = px.imshow(
@@ -108,7 +112,8 @@ with tab4:
     topic_sel = st.selectbox("Filter by topic", ["All"] + TOPICS)
     df_top = get_top_posts(client_id, topic_sel, 50)
     if df_top.empty:
-        st.info("No posts yet.")
+        st.info("No posts yet. Run stage 1 on the Pipeline page.")
+        render_page_link(st, "Pipeline.py", "Open Pipeline")
     else:
         st.dataframe(
             df_top,
@@ -126,7 +131,8 @@ with tab5:
     st.subheader("Hashtag Intelligence")
     df_ht = get_hashtag_intelligence(client_id, 40)
     if df_ht.empty:
-        st.info("No hashtag data yet.")
+        st.info("No hashtag data yet. Run stage 1 on the Pipeline page to scrape posts with captions.")
+        render_page_link(st, "Pipeline.py", "Open Pipeline")
     else:
         if HAS_PLOTLY:
             fig_ht = px.bar(

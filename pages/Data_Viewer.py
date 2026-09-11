@@ -5,9 +5,10 @@ from datetime import datetime
 
 from core.client_context import render_client_selector
 from core.db import get_connection, init_db
+from core.navigation import render_page_link
 
 st.set_page_config(page_title="Data Viewer", page_icon="📊", layout="wide")
-st.title("📊 Data Viewer")
+st.title("Data Viewer")
 
 init_db()
 active_client = render_client_selector()
@@ -180,7 +181,8 @@ with st.spinner("Loading…"):
 
 if df.empty and st.session_state.data_page == 0:
     conn.close()
-    st.warning("⚠️ No data yet. Go to the **Scraper** page (home) and run a scrape first.")
+    st.warning("No reels yet. Run stage 1 on the Pipeline page to scrape this client's competitor accounts.")
+    render_page_link(st, "Pipeline.py", "Open Pipeline")
     st.stop()
 
 # ── Summary metrics ────────────────────────────────────────────────────────────
