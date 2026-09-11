@@ -19,11 +19,11 @@ def _fmt(usd):
 st.subheader(client["name"])
 
 cols = st.columns(4)
-cols[0].metric("Reels analysed", f"{costs['reels_analysed']:,}")
-cols[1].metric("Pieces generated", f"{costs['pieces_generated']:,}")
+cols[0].metric("This month", _fmt(costs["month_total_usd"]))
+cols[1].metric("All time", _fmt(costs["total_usd"]))
 cols[2].metric(
-    "Total" + ("" if costs["total_is_complete"] else " (partial)"),
-    _fmt(costs["total_usd"]),
+    "Pieces generated",
+    f"{costs['pieces_generated']:,}",
 )
 cols[3].metric("Cost per piece", _fmt(costs["cost_per_piece"]))
 
@@ -35,7 +35,8 @@ for key, label in LINES:
     rows.append(
         {
             "Line": label,
-            "Cost": _fmt(line["usd"]),
+            "This month": _fmt(line["month_usd"]),
+            "All time": _fmt(line["all_time_usd"]),
             "Complete": "yes" if line["known"] else "no",
         }
     )

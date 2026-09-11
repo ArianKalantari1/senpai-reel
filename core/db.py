@@ -356,7 +356,8 @@ def init_db():
         extracted_at TIMESTAMP,
         model        TEXT,
         embedding    FLOAT[1536],
-        embedded_at  TIMESTAMP
+        embedded_at  TIMESTAMP,
+        embedding_cost_usd DOUBLE
     )
     """)
 
@@ -395,6 +396,8 @@ def init_db():
             conn.execute(f"ALTER TABLE scrape_jobs ADD COLUMN {col} {typedef}")
         except Exception:
             pass  # already present
+
+    _add_column_if_missing(conn, "message_units", "embedding_cost_usd", "DOUBLE")
 
     # Idempotent migrations for databases created before Phase 0 multi-client work.
     for col, typedef in [

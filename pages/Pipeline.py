@@ -7,6 +7,7 @@ from core.config import get_secret, missing_secret_message, secret_status
 from core.db import init_db
 from core.navigation import render_page_link
 from core.pipeline import (
+    LOCK_HEARTBEAT_INTERVAL_SECONDS,
     get_pipeline_lock,
     get_pipeline_snapshot,
     force_release_pipeline_lock,
@@ -69,9 +70,11 @@ def _progress_callback(progress_bar, status_slot, run_started):
 def _render_busy_lock(held):
     """Explain who holds the lock, and offer recovery once it looks abandoned."""
     stage = held.get("stage") or "Starting"
+    age = held.get("age_sec")
     hb = held.get("heartbeat_age_sec")
-    hb_text = f" · last activity {_format_duration(hb)} ago" if hb is not None else ""
-    st.caption(f"Current stage: {stage}{hb_text}")
+    age_text = f"lock age {_format_duration(age)}" if age is not None else "lock age unknown"
+    hb_text = f"last heartbeat {_format_duration(hb)} ago" if hb is not None else "last heartbeat unknown"
+    st.caption(f"Current stage: {stage} · {age_text} · {hb_text}")
 
     if not held.get("abandoned"):
         return
@@ -102,9 +105,20 @@ def _run_stage_with_lock(stage_name: str, stage_fn):
     progress_bar = st.progress(0)
     status_slot = st.empty()
     started = time.monotonic()
+    ui_callback = _progress_callback(progress_bar, status_slot, started)
+    last_heartbeat = 0.0
+
+    def _locked_callback(event: dict):
+        nonlocal last_heartbeat
+        now = time.monotonic()
+        if now - last_heartbeat >= LOCK_HEARTBEAT_INTERVAL_SECONDS:
+            update_pipeline_lock(run_id, event.get("stage") or stage_name)
+            last_heartbeat = now
+        ui_callback(event)
+
     try:
         update_pipeline_lock(run_id, stage_name)
-        result = stage_fn(_progress_callback(progress_bar, status_slot, started))
+        result = stage_fn(_locked_callback)
     finally:
         release_pipeline_lock(run_id)
     progress_bar.empty()

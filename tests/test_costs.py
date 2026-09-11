@@ -1,7 +1,8 @@
 """Per-client cost rollup (creative-director-ai #14)."""
+from datetime import datetime
+
 import pytest
 
-import core.costs as costs_mod
 from core.costs import apify_rate_usd, client_costs, estimate_transcription_usd
 
 
@@ -13,25 +14,33 @@ def db(tmp_path, monkeypatch):
     return db_mod
 
 
-def _seed(db_mod, client_id, scrape_cost=None, jobs=1):
+def _seed(db_mod, client_id, scrape_cost=None, jobs=1, when=None, suffix=""):
+    when = when or datetime.utcnow()
+    post_id = f"p_{client_id}{suffix}"
     conn = db_mod.get_connection()
     try:
         for i in range(jobs):
             conn.execute(
                 "INSERT INTO scrape_jobs (job_id, client_id, username, reels_found, "
-                "status, cost_usd) VALUES (?,?,?,?,?,?)",
-                [f"j{i}_{client_id}", client_id, "acct", 10, "done", scrape_cost],
+                "status, cost_usd, started_at, finished_at) VALUES (?,?,?,?,?,?,?,?)",
+                [f"j{i}_{client_id}{suffix}", client_id, "acct", 10, "done", scrape_cost, when, when],
             )
         conn.execute(
-            "INSERT INTO transcripts (post_id, client_id, cost_usd, extraction_cost_usd) "
-            "VALUES (?,?,?,?)", [f"p_{client_id}", client_id, 0.05, 0.01]
+            "INSERT INTO transcripts (post_id, client_id, cost_usd, extraction_cost_usd, transcribed_at) "
+            "VALUES (?,?,?,?,?)", [post_id, client_id, 0.05, 0.01, when]
+        )
+        conn.execute(
+            "INSERT INTO message_units (unit_id, client_id, post_id, embedding_cost_usd, embedded_at) "
+            "VALUES (?,?,?,?,?)",
+            [f"u_{client_id}{suffix}", client_id, post_id, 0.001, when],
         )
         conn.execute(
             "INSERT INTO generated_content (gen_id, client_id, content_type, output_text, "
-            "cost_usd) VALUES (?,?,?,?,?)", [f"g_{client_id}", client_id, "caption", "x", 0.002]
+            "cost_usd, created_at) VALUES (?,?,?,?,?,?)",
+            [f"g_{client_id}{suffix}", client_id, "caption", "x", 0.002, when],
         )
         conn.execute("INSERT INTO client_posts (client_id, post_id) VALUES (?,?)",
-                     [client_id, f"p_{client_id}"])
+                     [client_id, post_id])
     finally:
         conn.close()
 
@@ -67,7 +76,8 @@ class TestRollup:
         out = client_costs("c2")
         assert out["total_is_complete"] is True
         assert out["lines"]["scraping"]["usd"] == pytest.approx(0.023)
-        assert out["total_usd"] == pytest.approx(0.023 + 0.05 + 0.01 + 0.002)
+        assert out["lines"]["extraction"]["usd"] == pytest.approx(0.011)
+        assert out["total_usd"] == pytest.approx(0.023 + 0.05 + 0.011 + 0.002)
 
     def test_cost_per_piece(self, db):
         _seed(db, "c3", scrape_cost=0.01)
@@ -87,6 +97,17 @@ class TestRollup:
         _seed(db, "cB", scrape_cost=99.0)
         assert client_costs("cA")["lines"]["scraping"]["usd"] == pytest.approx(1.0)
         assert client_costs("cB")["lines"]["scraping"]["usd"] == pytest.approx(99.0)
+
+    def test_month_and_all_time_are_separate(self, db):
+        now = datetime(2026, 9, 10, 12, 0, 0)
+        old = datetime(2026, 8, 31, 12, 0, 0)
+        _seed(db, "cMonth", scrape_cost=0.10, when=now, suffix="_now")
+        _seed(db, "cMonth", scrape_cost=0.20, jobs=1, when=old, suffix="_old")
+
+        out = client_costs("cMonth", now=now)
+
+        assert out["month_total_usd"] == pytest.approx(0.10 + 0.05 + 0.011 + 0.002)
+        assert out["total_usd"] == pytest.approx(0.30 + 0.10 + 0.022 + 0.004)
 
     def test_empty_client_is_zero_not_error(self, db):
         out = client_costs("nobody")

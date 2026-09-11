@@ -187,7 +187,7 @@ Client-scoped pipeline dashboard with one-click operation:
 | Extract units | Run knowledge extraction |
 | Embed | Run semantic embeddings |
 
-The **Run Everything Pending** button chains those stages in dependency order. It uses a DuckDB-backed `pipeline_locks` row so only one write-heavy pipeline run can operate at a time, and it shows a clear busy state on other write pages.
+The **Run Everything Pending** button chains those stages in dependency order. It uses a DuckDB-backed `pipeline_locks` row so only one write-heavy pipeline run can operate at a time, and it shows a clear busy state on other write pages. If a process dies mid-run, the Pipeline page shows lock age, last heartbeat, and a force-release control once the heartbeat is stale.
 
 The page also warns when pending downloads are approaching Apify CDN expiry. URLs older than roughly 18 hours are flagged because media links commonly expire within 24–48 hours.
 
@@ -203,6 +203,14 @@ Guided first-run path:
 #### Settings (`pages/Settings.py`)
 
 Shows whether `APIFY_TOKEN`, `DEEPGRAM_API_KEY`, and `OPENAI_API_KEY` are configured. Users can paste keys for the current Streamlit session. Session keys are not persisted; permanent setup still uses `.streamlit/secrets.toml` or environment variables.
+
+Apify scrape cost uses `APIFY_USD_PER_RESULT` when configured. If that value is missing, scrape cost is shown as unknown rather than zero.
+
+#### Costs (`pages/Costs.py`)
+
+Per-client cost meter with this-month and all-time totals for Apify scraping, Deepgram transcription, OpenAI extraction + embeddings, and OpenAI generation.
+
+The page also shows reels scraped, reels transcribed, reels analysed, pieces generated, and all-time cost per generated piece. That cost-per-piece value is the number to compare against the client's existing tool subscriptions.
 
 #### Home / Scraper (`app.py`)
 
@@ -309,13 +317,13 @@ All outputs are saved to the `generated_content` table automatically.
 | `profiles` | 1 | Legacy: one row per scrape run summary |
 | `creator_accounts` | 1 | One row per Instagram account (bio, followers, etc.) |
 | `posts` | 1–2 | One row per reel (canonical, includes download + audio paths) |
-| `scrape_jobs` | 1 | Audit log of every scrape run (status, counts, errors) |
+| `scrape_jobs` | 1 | Audit log of every scrape run (status, counts, errors, Apify cost) |
 | `reels` | 1 | Legacy structured reels (kept for old pages compatibility) |
 | `comments` | 1 | Reel comments (recursive, supports replies) |
 | `tagged_users` | 1 | Users tagged in reels |
 | `transcripts` | 3 | One row per transcribed post (text, confidence, cost) |
 | `transcript_words` | 3 | One row per word with start/end timestamps |
-| `message_units` | 4 | One row per extracted knowledge unit (text, topic, type, embedding) |
+| `message_units` | 4 | One row per extracted knowledge unit (text, topic, type, embedding, embedding cost) |
 | `generated_content` | 5 | All AI-generated captions/hooks/scripts with cost tracking |
 | `pipeline_locks` | Ops | Single-row lock for write-heavy pipeline runs |
 
@@ -330,6 +338,7 @@ All outputs are saved to the `generated_content` table automatically.
 APIFY_TOKEN = "apify_api_..."          # Required for Stage 1 scraping
 DEEPGRAM_API_KEY = "..."               # Required for Stage 3 transcription
 OPENAI_API_KEY = "sk-..."             # Required for Stages 4, 4b, and Content Studio
+APIFY_USD_PER_RESULT = "0.0025"      # Optional; used for scrape-job cost capture
 ```
 
 Keys can also be pasted on the Settings page for the current Streamlit session.
@@ -349,7 +358,7 @@ If any key is missing:
 1. Open Onboarding.
 2. Name the client and add competitor accounts.
 3. Open Pipeline and click Run Everything Pending.
-4. Use Search, Analytics, or Content Studio.
+4. Use Search, Analytics, Costs, or Content Studio.
 ```
 
 The older per-stage controls remain on Home, Corpus Explorer, and Search while the chained pipeline proves itself.
@@ -363,6 +372,6 @@ Empty states on each page point back to the Pipeline stage that fills the missin
 | Issue | Severity | Notes |
 |-------|----------|-------|
 | Apify CDN URLs expire in ~24–48h | Medium | Pipeline and Download Queue warn when pending media URLs are getting old |
-| DuckDB lock conflict | Medium | Pipeline runs use `pipeline_locks`; write pages show a busy state while a run is active |
+| DuckDB lock conflict | Medium | Pipeline runs use `pipeline_locks`; write pages show a busy state while a run is active. Pipeline can force-release a stale heartbeat. |
 | `use_container_width` warnings | Low | Fixed in latest commit — cosmetic only |
 | WAL file growth | Low | `reels.duckdb.wal` will grow with each write session. No auto-checkpoint UI. |
