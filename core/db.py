@@ -399,6 +399,47 @@ def init_db():
 
     _add_column_if_missing(conn, "message_units", "embedding_cost_usd", "DOUBLE")
 
+
+    # ── Per-persona taxonomy (creative-director-ai #25) ───────────────────────
+    # Topics are per-client and versioned. Versioning is the reversibility
+    # guarantee: re-extraction is cheap (~$1.50 per 5,000 reels, since
+    # transcripts are retained), but only if prior assignments survive the
+    # change. Without it, a renamed or split topic destroys the ability to tell
+    # whether a gap closed or a label moved.
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS taxonomy_versions (
+        taxonomy_id TEXT PRIMARY KEY,
+        client_id   TEXT,
+        version     INTEGER,
+        created_at  TIMESTAMP,
+        is_active   BOOLEAN DEFAULT FALSE,
+        notes       TEXT
+    )
+    """)
+
+    # topic_id is stable across versions for the same logical topic, so a
+    # rename keeps its lineage. name/description are per-version.
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS topics (
+        taxonomy_id TEXT,
+        topic_id    TEXT,
+        client_id   TEXT,
+        name        TEXT,
+        description TEXT,
+        sort_order  INTEGER DEFAULT 0,
+        PRIMARY KEY (taxonomy_id, topic_id)
+    )
+    """)
+
+
+    # Pin each extraction to the taxonomy version that produced it, so a later
+    # version can be added alongside rather than overwriting history.
+    for col, typedef in [("topic_id", "TEXT"), ("taxonomy_id", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE message_units ADD COLUMN {col} {typedef}")
+        except Exception:
+            pass  # already present
+
     # Idempotent migrations for databases created before Phase 0 multi-client work.
     for col, typedef in [
         ("downloaded_at", "TIMESTAMP"),
@@ -456,6 +497,16 @@ def init_db():
             pass   # index may already exist
 
     conn.close()
+
+    # Seed the demo client's topics (creative-director-ai #25). Imported here
+    # rather than at module scope because core.taxonomy imports from this
+    # module. Idempotent, and only touches the demo client — a new persona
+    # starts with its own vocabulary rather than inheriting this one.
+    try:
+        from core.taxonomy import ensure_seed_taxonomy
+        ensure_seed_taxonomy()
+    except Exception:
+        pass  # never let seeding block database initialisation
 
 
 def get_connection():

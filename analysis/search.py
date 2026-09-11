@@ -49,7 +49,7 @@ def semantic_search(
         query:                Natural language search query
         openai_api_key:       For embedding the query
         client_id:            Active client scope
-        topic_filter:         Optional topic to restrict search (from taxonomy.TOPICS)
+        topic_filter:         Optional topic to restrict search (from this client's active taxonomy)
         content_type_filter:  Optional content_type to restrict search
         top_k:                Number of results to return
 
