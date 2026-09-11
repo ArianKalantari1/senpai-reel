@@ -208,7 +208,7 @@ class TestRunExtractionQueue:
         _seed_transcript(queue_db, "fail_1", "FAIL")
         _seed_transcript(queue_db, "ok_2", "B " * 50)
 
-        def fake_extract(transcript, post_id, api_key):
+        def fake_extract(transcript, post_id, api_key, **_kwargs):
             if transcript == "FAIL":
                 raise RuntimeError("API error")
             return _mock_units_for(post_id), 0.0005
@@ -242,7 +242,7 @@ class TestRunExtractionQueue:
         max_active_writes = 0
         lock = threading.Lock()
 
-        def fake_extract(transcript, post_id, api_key):
+        def fake_extract(transcript, post_id, api_key, **_kwargs):
             return _mock_units_for(post_id), 0.0005
 
         def slow_save(units, client_id):
