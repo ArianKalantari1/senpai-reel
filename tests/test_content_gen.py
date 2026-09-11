@@ -16,7 +16,12 @@ class TestFormatReferenceContext:
         result = format_reference_context([])
         assert isinstance(result, str)
 
-    def test_includes_unit_text(self):
+    def test_uses_claim_and_excludes_verbatim_text(self):
+        """Competitor expression must not reach the generator (issue #17).
+
+        `text` is captured verbatim from the competitor transcript, `claim`
+        is the extractor's own abstraction. Only the abstraction may cross.
+        """
         from analysis.prompts import format_reference_context
 
         class FakeUnit:
@@ -26,7 +31,39 @@ class TestFormatReferenceContext:
             claim = "Customise to each role"
 
         result = format_reference_context([FakeUnit()])
-        assert "Always tailor your resume" in result
+        assert "Customise to each role" in result
+        assert "Always tailor your resume" not in result
+
+    def test_falls_back_to_truncated_text_when_claim_missing(self):
+        from analysis.prompts import format_reference_context
+
+        class FakeUnit:
+            text = "x" * 400
+            topic = "Resume"
+            content_type = "tip"
+            claim = ""
+
+        result = format_reference_context([FakeUnit()])
+        assert "x" in result
+        assert result.count("x") == 120, "fallback text must be truncated"
+
+    def test_skips_units_with_no_usable_body(self):
+        from analysis.prompts import format_reference_context
+
+        class Empty:
+            text = ""
+            topic = "Resume"
+            content_type = "tip"
+            claim = ""
+
+        assert format_reference_context([Empty()]) == "(no reference units selected)"
+
+    def test_all_system_prompts_carry_originality_constraint(self):
+        from analysis.prompts import CAPTION_SYSTEM, HOOKS_SYSTEM, SCRIPT_SYSTEM
+
+        for prompt in (CAPTION_SYSTEM, HOOKS_SYSTEM, SCRIPT_SYSTEM):
+            assert "your own words" in prompt
+            assert "Do not reuse phrases" in prompt
 
     def test_includes_topic(self):
         from analysis.prompts import format_reference_context
