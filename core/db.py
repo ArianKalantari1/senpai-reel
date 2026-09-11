@@ -690,6 +690,34 @@ def _link_post_to_client(conn, client_id: str, post_id: str):
     )
 
 
+def _opt_number(value, cast):
+    """Cast to a number, preserving None.
+
+    Deliberately not `cast(value or 0)`: an absent count and a real zero are
+    different facts. Unparseable input also reads as unknown rather than zero,
+    because guessing zero is how a wrong number becomes invisible.
+    """
+    if value is None:
+        return None
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _engagement_rate(likes, views):
+    """Likes as a percentage of views, or None when that cannot be known.
+
+    Returns None if either input is missing. Previously this returned 0.0,
+    which reads as "nobody engaged" rather than "we do not know", and that
+    difference matters once the number is used to rank content or to compare
+    one acquisition source against another.
+    """
+    if likes is None or views is None or views <= 0:
+        return None
+    return round(likes / views * 100, 4)
+
+
 def upsert_post(account_id: str, item: dict, client_id: str = DEFAULT_CLIENT_ID) -> bool:
     """Insert or update a post from a scraped Apify item.
     Returns True if this was a new post, False if updated."""
@@ -703,9 +731,14 @@ def upsert_post(account_id: str, item: dict, client_id: str = DEFAULT_CLIENT_ID)
     hashtags = _extract_hashtags(caption)
     mentions = _extract_mentions(caption)
     caption_clean = _clean_caption(caption)
-    likes = item.get("likesCount") or 0
-    views = item.get("videoViewCount") or 0
-    engagement_rate = round((likes / views * 100), 4) if views > 0 else 0.0
+    # `or 0` here would make "the source did not supply this" and "this is
+    # genuinely zero" indistinguishable, which silently corrupts engagement
+    # maths. Missing stays NULL. See creative-director-ai #21.
+    likes = _opt_number(item.get("likesCount"), int)
+    views = _opt_number(item.get("videoViewCount"), int)
+    comments_count = _opt_number(item.get("commentsCount"), int)
+    duration_sec = _opt_number(item.get("videoDuration"), float)
+    engagement_rate = _engagement_rate(likes, views)
     now = datetime.utcnow()
 
     thumbnail = None
@@ -727,7 +760,7 @@ def upsert_post(account_id: str, item: dict, client_id: str = DEFAULT_CLIENT_ID)
                 scraped_at = ?, video_url = ?, audio_url = ?,
                 client_id = COALESCE(client_id, ?)
             WHERE post_id = ?
-        """, (likes, views, item.get("commentsCount") or 0, engagement_rate,
+        """, (likes, views, comments_count, engagement_rate,
               now, item.get("videoUrl"), item.get("audioUrl"), client_id, post_id))
     else:
         conn.execute("""
@@ -750,8 +783,8 @@ def upsert_post(account_id: str, item: dict, client_id: str = DEFAULT_CLIENT_ID)
             mentions,
             likes,
             views,
-            item.get("commentsCount") or 0,
-            item.get("videoDuration") or 0.0,
+            comments_count,
+            duration_sec,
             fix_timestamp(item.get("timestamp")),
             now,
             item.get("videoUrl"),
