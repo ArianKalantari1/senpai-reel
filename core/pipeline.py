@@ -11,6 +11,13 @@ from core.db import get_connection, init_db
 
 PIPELINE_LOCK_NAME = "full_pipeline"
 LOCK_STALE_AFTER = timedelta(hours=4)
+
+# A live run refreshes its heartbeat at every stage change. Once the heartbeat
+# is older than this, the owning process has almost certainly died without
+# running its `finally` — a closed browser tab, a restart, an OOM kill. That is
+# enough to *offer* a manual release; it is deliberately not enough to release
+# automatically, because a long single stage can legitimately go quiet.
+LOCK_ABANDONED_AFTER = timedelta(minutes=10)
 CDN_EXPIRY_WARNING_HOURS = 18
 CDN_EXPIRY_HIGH_RISK_HOURS = 36
 
@@ -24,6 +31,17 @@ def _now() -> datetime:
 
 def _elapsed(started_at: float) -> float:
     return round(time.monotonic() - started_at, 1)
+
+
+def _age_seconds(ts) -> Optional[float]:
+    """Seconds since a stored TIMESTAMP. Distinct from _elapsed(), which
+    measures a monotonic clock rather than a wall-clock column."""
+    if ts is None:
+        return None
+    try:
+        return round((_now() - ts).total_seconds(), 1)
+    except TypeError:
+        return None
 
 
 def _stage_result(
@@ -75,14 +93,22 @@ def _emit(
 def _row_to_lock(row) -> Optional[dict]:
     if not row:
         return None
-    return {
+    heartbeat_at = row[4]
+    lock = {
         "lock_name": row[0],
         "run_id": row[1],
         "client_id": row[2],
         "started_at": row[3],
-        "heartbeat_at": row[4],
+        "heartbeat_at": heartbeat_at,
         "stage": row[5],
+        "age_sec": _age_seconds(row[3]),
+        "heartbeat_age_sec": _age_seconds(heartbeat_at),
     }
+    lock["abandoned"] = (
+        lock["heartbeat_age_sec"] is not None
+        and lock["heartbeat_age_sec"] >= LOCK_ABANDONED_AFTER.total_seconds()
+    )
+    return lock
 
 
 def get_pipeline_lock() -> Optional[dict]:
@@ -667,3 +693,32 @@ def run_everything_pending(
         }
     finally:
         release_pipeline_lock(run_id)
+
+
+def force_release_pipeline_lock(run_id: str) -> dict:
+    """Release a lock whose owning process appears to be gone.
+
+    Refuses while the heartbeat is fresh. Releasing a live lock would let two
+    pipelines write at once, which is worse than the stuck state this exists
+    to clear. The caller must pass the run_id it was shown, so a lock that was
+    replaced between render and click is not released by accident.
+    """
+    lock = get_pipeline_lock()
+    if not lock:
+        return {"released": False, "reason": "No pipeline lock is held."}
+    if lock["run_id"] != run_id:
+        return {
+            "released": False,
+            "reason": "This lock changed since the page was loaded. Refresh and check again.",
+        }
+    if not lock["abandoned"]:
+        mins = int(LOCK_ABANDONED_AFTER.total_seconds() // 60)
+        return {
+            "released": False,
+            "reason": (
+                f"This run is still sending heartbeats, so it is still alive. "
+                f"Force release only becomes available after {mins} minutes of silence."
+            ),
+        }
+    release_pipeline_lock(run_id)
+    return {"released": True, "reason": "Released. The stage that was interrupted can be re-run."}
