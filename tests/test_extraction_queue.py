@@ -3,6 +3,8 @@ Tests for processing/extraction_queue.py — stats and batch processing.
 """
 import json
 import uuid
+import threading
+import time
 import pytest
 import duckdb
 from unittest.mock import patch, MagicMock
@@ -109,6 +111,26 @@ def _mock_extract_response(num_units=2):
     return units, 0.0005
 
 
+def _mock_units_for(post_id, num_units=1):
+    from analysis.extraction import MessageUnit
+
+    return [
+        MessageUnit(
+            unit_id=str(uuid.uuid4()),
+            post_id=post_id,
+            text=f"tip {i}",
+            claim=f"claim {i}",
+            advice=None,
+            topic="Resume",
+            subtopic=None,
+            content_type="tip",
+            confidence=0.9,
+            extracted_at=datetime.utcnow(),
+        )
+        for i in range(num_units)
+    ]
+
+
 class TestRunExtractionQueue:
     def test_no_transcripts_returns_zero(self, queue_db):
         from processing.extraction_queue import run_extraction_queue
@@ -178,3 +200,65 @@ class TestRunExtractionQueue:
             result = run_extraction_queue("fake_key", batch_size=3)
 
         assert result["total"] == 3  # only 3 of 5 processed
+
+    def test_partial_failure_keeps_successful_item_writes(self, queue_db):
+        from processing.extraction_queue import run_extraction_queue
+
+        _seed_transcript(queue_db, "ok_1", "A " * 50)
+        _seed_transcript(queue_db, "fail_1", "FAIL")
+        _seed_transcript(queue_db, "ok_2", "B " * 50)
+
+        def fake_extract(transcript, post_id, api_key):
+            if transcript == "FAIL":
+                raise RuntimeError("API error")
+            return _mock_units_for(post_id), 0.0005
+
+        with patch("processing.extraction_queue.extract_message_units", side_effect=fake_extract):
+            result = run_extraction_queue("fake_key", max_workers=3)
+
+        assert result["total"] == 3
+        assert result["done"] == 2
+        assert result["failed"] == 1
+
+        conn = duckdb.connect(queue_db.DB_PATH)
+        saved_posts = conn.execute(
+            "SELECT DISTINCT post_id FROM message_units ORDER BY post_id"
+        ).fetchall()
+        failed_cost = conn.execute(
+            "SELECT extraction_cost_usd FROM transcripts WHERE post_id = 'fail_1'"
+        ).fetchone()[0]
+        conn.close()
+
+        assert [row[0] for row in saved_posts] == ["ok_1", "ok_2"]
+        assert failed_cost is None
+
+    def test_parallel_extraction_serializes_saves(self, queue_db):
+        from processing.extraction_queue import run_extraction_queue
+
+        for i in range(5):
+            _seed_transcript(queue_db, f"serial_{i}", "A " * 50)
+
+        active_writes = 0
+        max_active_writes = 0
+        lock = threading.Lock()
+
+        def fake_extract(transcript, post_id, api_key):
+            return _mock_units_for(post_id), 0.0005
+
+        def slow_save(units, client_id):
+            nonlocal active_writes, max_active_writes
+            with lock:
+                active_writes += 1
+                max_active_writes = max(max_active_writes, active_writes)
+            time.sleep(0.02)
+            with lock:
+                active_writes -= 1
+
+        with (
+            patch("processing.extraction_queue.extract_message_units", side_effect=fake_extract),
+            patch("processing.extraction_queue.save_message_units", side_effect=slow_save),
+        ):
+            result = run_extraction_queue("fake_key", max_workers=5)
+
+        assert result["done"] == 5
+        assert max_active_writes == 1

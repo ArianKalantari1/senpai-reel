@@ -10,7 +10,8 @@ import logging
 from typing import Callable, Optional
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
-from processing.transcribe import transcribe_post
+from processing.concurrency import io_worker_count, run_bounded, run_db_write
+from processing.transcribe import save_transcript, transcribe_audio_file
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ def run_transcription_queue(
     batch_size: int = 10,
     progress_callback: Optional[Callable] = None,
     client_id: str = DEFAULT_CLIENT_ID,
+    max_workers: Optional[int] = None,
 ) -> dict:
     """
     Transcribe posts with audio but no transcript yet.
@@ -115,20 +117,33 @@ def run_transcription_queue(
     total_cost = 0.0
     errors = []
 
-    for i, (post_id, audio_path) in enumerate(rows):
-        try:
-            result = transcribe_post(post_id, api_key, provider, client_id)
-            done += 1
-            total_cost += result.cost_usd
-            if progress_callback:
-                progress_callback(i + 1, total, post_id, None)
-        except Exception as e:
+    def _transcribe(row):
+        post_id, audio_path = row
+        result = transcribe_audio_file(audio_path, post_id, api_key, provider, client_id)
+        run_db_write(save_transcript, result)
+        return result
+
+    def _progress(count, count_total, row, result, error):
+        if progress_callback:
+            progress_callback(count, count_total, row[0], str(error) if error else None)
+
+    completed = run_bounded(
+        rows,
+        _transcribe,
+        max_workers=io_worker_count(max_workers),
+        progress_callback=_progress,
+    )
+
+    for item in completed:
+        post_id = item.item[0]
+        if item.error:
             failed += 1
-            err_msg = str(e)
+            err_msg = str(item.error)
             errors.append({"post_id": post_id, "error": err_msg})
             logger.warning("Transcription failed for %s: %s", post_id, err_msg)
-            if progress_callback:
-                progress_callback(i + 1, total, post_id, err_msg)
+        else:
+            done += 1
+            total_cost += item.result.cost_usd
 
     return {
         "done": done,
