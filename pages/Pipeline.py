@@ -9,6 +9,7 @@ from core.navigation import render_page_link
 from core.pipeline import (
     get_pipeline_lock,
     get_pipeline_snapshot,
+    force_release_pipeline_lock,
     release_pipeline_lock,
     run_audio_stage,
     run_download_stage,
@@ -65,12 +66,36 @@ def _progress_callback(progress_bar, status_slot, run_started):
     return _callback
 
 
+def _render_busy_lock(held):
+    """Explain who holds the lock, and offer recovery once it looks abandoned."""
+    stage = held.get("stage") or "Starting"
+    hb = held.get("heartbeat_age_sec")
+    hb_text = f" · last activity {_format_duration(hb)} ago" if hb is not None else ""
+    st.caption(f"Current stage: {stage}{hb_text}")
+
+    if not held.get("abandoned"):
+        return
+
+    st.warning(
+        "This run has not reported activity for a while, which usually means the "
+        "process was interrupted — a closed tab, a restart, or a crash. "
+        "The pipeline stays locked until it is released."
+    )
+    if st.button("Force release lock", key=f"force_release_{held['run_id']}"):
+        outcome = force_release_pipeline_lock(held["run_id"])
+        if outcome["released"]:
+            st.success(outcome["reason"])
+        else:
+            st.error(outcome["reason"])
+        st.rerun()
+
+
 def _run_stage_with_lock(stage_name: str, stage_fn):
     lock = try_start_pipeline_run(client_id)
     if not lock["acquired"]:
         st.error(lock.get("error") or "Pipeline busy. Wait for the current run to finish, then try again.")
         if lock.get("lock"):
-            st.caption(f"Current stage: {lock['lock'].get('stage') or 'Starting'}")
+            _render_busy_lock(lock["lock"])
         return None
 
     run_id = lock["run_id"]
@@ -114,10 +139,8 @@ lock = get_pipeline_lock()
 is_busy = lock is not None
 
 if is_busy:
-    st.warning(
-        f"Pipeline busy for client `{lock['client_id']}`. "
-        f"Current stage: {lock.get('stage') or 'Starting'}."
-    )
+    st.warning(f"Pipeline busy for client `{lock['client_id']}`.")
+    _render_busy_lock(lock)
 
 configured = {row["name"]: row["configured"] for row in secret_status(st)}
 missing = [name for name, ok in configured.items() if not ok]
