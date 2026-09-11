@@ -4,7 +4,7 @@ import pandas as pd
 st.set_page_config(page_title="Content Studio", page_icon="✍️", layout="wide")
 st.title("Content Studio")
 
-from analysis.taxonomy import TOPICS
+from core.taxonomy import topic_names
 from analysis.search import keyword_search, semantic_search
 from core.client_context import render_client_selector
 from core.config import get_secret, missing_secret_message
@@ -88,7 +88,7 @@ else:
     col_topic, col_tone, col_angle = st.columns([2, 1, 3])
 
     with col_topic:
-        topic = st.selectbox("Topic", TOPICS)
+        topic = st.selectbox("Topic", topic_names(client_id))
 
     with col_tone:
         tone = st.selectbox("Tone", ["professional", "friendly", "bold", "educational"])

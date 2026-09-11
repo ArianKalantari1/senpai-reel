@@ -17,7 +17,7 @@ from analysis.analytics import (
     get_top_posts,
     get_hashtag_intelligence,
 )
-from analysis.taxonomy import TOPICS
+from core.taxonomy import topic_names
 from core.client_context import render_client_selector
 from core.db import init_db
 from core.navigation import render_page_link
@@ -109,7 +109,7 @@ with tab3:
 # ── Tab 4: Top Reels ───────────────────────────────────────────────────────────
 with tab4:
     st.subheader("Top Performing Reels")
-    topic_sel = st.selectbox("Filter by topic", ["All"] + TOPICS)
+    topic_sel = st.selectbox("Filter by topic", ["All"] + topic_names(client_id))
     df_top = get_top_posts(client_id, topic_sel, 50)
     if df_top.empty:
         st.info("No posts yet. Run stage 1 on the Pipeline page.")

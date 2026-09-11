@@ -2,8 +2,10 @@ from core.db import init_db, get_connection
 init_db()
 print('init_db OK')
 
-from analysis.taxonomy import TOPICS, CONTENT_TYPES
-print('taxonomy OK —', len(TOPICS), 'topics')
+from analysis.taxonomy import CONTENT_TYPES
+from core.taxonomy import topic_names
+from core.db import DEFAULT_CLIENT_ID
+print('taxonomy OK —', len(topic_names(DEFAULT_CLIENT_ID)), 'topics for the demo client')
 
 from analysis.extraction import extract_message_units
 from processing.extraction_queue import get_extraction_stats

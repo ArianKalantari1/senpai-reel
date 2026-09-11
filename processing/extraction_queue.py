@@ -101,7 +101,9 @@ def run_extraction_queue(
 
     for i, (post_id, transcript) in enumerate(rows):
         try:
-            units, cost = extract_message_units(transcript, post_id, openai_api_key)
+            units, cost = extract_message_units(
+                transcript, post_id, openai_api_key, client_id=client_id
+            )
             for unit in units:
                 unit.client_id = client_id
             save_message_units(units, client_id)

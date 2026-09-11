@@ -3,7 +3,8 @@ import streamlit as st
 st.set_page_config(page_title="Search", page_icon="🔍", layout="wide")
 st.title("Search")
 
-from analysis.taxonomy import TOPICS, CONTENT_TYPES
+from analysis.taxonomy import CONTENT_TYPES
+from core.taxonomy import topic_names
 from analysis.search import semantic_search, keyword_search
 from core.client_context import render_client_selector
 from core.config import get_secret, missing_secret_message
@@ -80,7 +81,7 @@ def _render_search(openai_key: str, total_units: int, embedded_units: int):
         query = st.text_input("Search query", placeholder="e.g., how to pass ATS screening")
 
     with col_topic:
-        topic_filter = st.selectbox("Topic", ["All"] + TOPICS)
+        topic_filter = st.selectbox("Topic", ["All"] + topic_names(client_id))
 
     with col_ct:
         ct_filter = st.selectbox("Content type", ["All"] + CONTENT_TYPES)

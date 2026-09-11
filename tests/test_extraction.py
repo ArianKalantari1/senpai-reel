@@ -14,16 +14,24 @@ from datetime import datetime
 class TestTaxonomy:
     def test_validate_topic_exact(self):
         from analysis.taxonomy import validate_topic
-        assert validate_topic("Resume") == "Resume"
+        from core.db import DEFAULT_CLIENT_ID
+        _, name = validate_topic(DEFAULT_CLIENT_ID, "Resume")
+        assert name == "Resume"
 
     def test_validate_topic_case_insensitive(self):
         from analysis.taxonomy import validate_topic
-        assert validate_topic("resume") == "Resume"
-        assert validate_topic("LINKEDIN") == "LinkedIn"
+        from core.db import DEFAULT_CLIENT_ID
+        assert validate_topic(DEFAULT_CLIENT_ID, "resume")[1] == "Resume"
+        assert validate_topic(DEFAULT_CLIENT_ID, "LINKEDIN")[1] == "LinkedIn"
 
-    def test_validate_topic_unknown_returns_general(self):
+    def test_validate_topic_unknown_falls_back_to_catch_all(self):
+        """Unknown topics land in the client's own catch-all, not a hardcoded name."""
         from analysis.taxonomy import validate_topic
-        assert validate_topic("Nonsense") == "General"
+        from core.db import DEFAULT_CLIENT_ID
+        from core.taxonomy import CATCH_ALL_TOPIC_ID
+        topic_id, name = validate_topic(DEFAULT_CLIENT_ID, "Nonsense")
+        assert topic_id == CATCH_ALL_TOPIC_ID
+        assert name == "General"  # the demo client happens to call it that
 
     def test_validate_content_type_exact(self):
         from analysis.taxonomy import validate_content_type
@@ -39,9 +47,14 @@ class TestTaxonomy:
         assert validate_content_type("unknown_type") == "other"
 
     def test_all_topics_validate(self):
-        from analysis.taxonomy import TOPICS, validate_topic
-        for t in TOPICS:
-            assert validate_topic(t) == t
+        """Topics resolve against the client's own taxonomy, not a global list."""
+        from analysis.taxonomy import validate_topic
+        from core.db import DEFAULT_CLIENT_ID
+        from core.taxonomy import topic_names
+        for name in topic_names(DEFAULT_CLIENT_ID):
+            topic_id, resolved = validate_topic(DEFAULT_CLIENT_ID, name)
+            assert resolved == name
+            assert topic_id
 
     def test_all_content_types_validate(self):
         from analysis.taxonomy import CONTENT_TYPES, validate_content_type
@@ -49,9 +62,11 @@ class TestTaxonomy:
             assert validate_content_type(ct) == ct
 
     def test_topics_for_prompt_includes_all(self):
-        from analysis.taxonomy import TOPICS, topics_for_prompt
-        prompt_str = topics_for_prompt()
-        for topic in TOPICS:
+        from analysis.taxonomy import topics_for_prompt
+        from core.db import DEFAULT_CLIENT_ID
+        from core.taxonomy import topic_names
+        prompt_str = topics_for_prompt(DEFAULT_CLIENT_ID)
+        for topic in topic_names(DEFAULT_CLIENT_ID):
             assert topic in prompt_str
 
     def test_content_types_for_prompt_includes_all(self):

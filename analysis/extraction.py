@@ -18,7 +18,6 @@ import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
 from analysis.taxonomy import (
-    TOPICS,
     CONTENT_TYPES,
     topics_for_prompt,
     content_types_for_prompt,
@@ -32,7 +31,7 @@ logger = logging.getLogger(__name__)
 _GPT_INPUT_COST_PER_TOKEN = 0.15 / 1_000_000
 _GPT_OUTPUT_COST_PER_TOKEN = 0.60 / 1_000_000
 
-_SYSTEM_PROMPT = f"""You are an expert analyst specialising in Australian job market content on Instagram.
+_SYSTEM_PROMPT_TEMPLATE = """You are an expert analyst specialising in Australian job market content on Instagram.
 
 Your task: extract structured "message units" from Instagram reel transcripts.
 
@@ -43,10 +42,10 @@ For each unit, return a JSON object with these fields:
   - claim:        The core assertion in one sentence (your words)
   - advice:       Actionable instruction if any (null if not applicable)
   - topic:        ONE of the following topics:
-{topics_for_prompt()}
+{topics}
   - subtopic:     One-word refinement (e.g. "keywords", "salary_negotiation") or null
   - content_type: ONE of the following types:
-{content_types_for_prompt()}
+{content_types}
   - confidence:   Your extraction confidence 0.0–1.0
 
 Return a JSON object: {{"units": [...]}}
@@ -70,6 +69,8 @@ class MessageUnit:
     subtopic: Optional[str]
     content_type: str
     confidence: float
+    topic_id: Optional[str] = None
+    taxonomy_id: Optional[str] = None
     source_start: Optional[float] = None
     source_end: Optional[float] = None
     extracted_at: Optional[datetime] = None
@@ -77,10 +78,24 @@ class MessageUnit:
     client_id: str = DEFAULT_CLIENT_ID
 
 
+def build_system_prompt(client_id: str) -> str:
+    """Build the extraction prompt against one client's topic vocabulary.
+
+    Previously a module-level f-string, which baked the Jobs-AU topics into
+    every extraction regardless of persona — so a second niche classified
+    almost entirely as the catch-all. See creative-director-ai #25.
+    """
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        topics=topics_for_prompt(client_id),
+        content_types=content_types_for_prompt(),
+    )
+
+
 def extract_message_units(
     transcript_text: str,
     post_id: str,
     openai_api_key: str,
+    client_id: str = DEFAULT_CLIENT_ID,
     model: str = "gpt-4o-mini",
 ) -> tuple[List[MessageUnit], float]:
     """
@@ -100,7 +115,7 @@ def extract_message_units(
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": build_system_prompt(client_id)},
             {"role": "user", "content": f"Transcript:\n{transcript_text[:4000]}"},
         ],
         "response_format": {"type": "json_object"},
@@ -134,13 +149,15 @@ def extract_message_units(
     now = datetime.utcnow()
     for ru in raw_units:
         try:
+            _topic_id, _topic_name = validate_topic(client_id, ru.get("topic", ""))
             unit = MessageUnit(
                 unit_id=str(uuid.uuid4()),
                 post_id=post_id,
                 text=str(ru.get("text", ""))[:300],
                 claim=str(ru.get("claim", ""))[:300],
                 advice=ru.get("advice") or None,
-                topic=validate_topic(ru.get("topic", "General")),
+                topic=_topic_name,
+                topic_id=_topic_id,
                 subtopic=ru.get("subtopic") or None,
                 content_type=validate_content_type(ru.get("content_type", "other")),
                 confidence=float(ru.get("confidence", 0.5)),
@@ -158,14 +175,21 @@ def save_message_units(units: List[MessageUnit], client_id: str = DEFAULT_CLIENT
     """Persist extracted message units to DB."""
     if not units:
         return
+
+    # Pin this batch to the taxonomy version in force now, so a later version
+    # can be added alongside rather than silently reinterpreting these rows.
+    from core.taxonomy import get_active_taxonomy
+    _active = get_active_taxonomy(client_id)
+    _taxonomy_id = _active["taxonomy_id"] if _active else None
+
     conn = get_connection()
     try:
         conn.executemany(
             """
             INSERT INTO message_units (
-                unit_id, client_id, post_id, text, claim, advice, topic, subtopic,
-                content_type, confidence, extracted_at, model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                unit_id, client_id, post_id, text, claim, advice, topic, topic_id,
+                taxonomy_id, subtopic, content_type, confidence, extracted_at, model
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (unit_id) DO NOTHING
             """,
             [
@@ -177,6 +201,8 @@ def save_message_units(units: List[MessageUnit], client_id: str = DEFAULT_CLIENT
                     u.claim,
                     u.advice,
                     u.topic,
+                    u.topic_id,
+                    getattr(u, "taxonomy_id", None) or _taxonomy_id,
                     u.subtopic,
                     u.content_type, u.confidence, u.extracted_at, u.model,
                 )
