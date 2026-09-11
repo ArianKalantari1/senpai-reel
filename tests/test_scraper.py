@@ -215,7 +215,7 @@ class TestScraperError:
         http_err = req_lib.exceptions.HTTPError("401 Unauthorized")
         mock_resp.raise_for_status.side_effect = http_err
 
-        with patch("collection.scraper.requests.post", return_value=mock_resp):
+        with patch("collection.sources.apify.requests.post", return_value=mock_resp):
             with pytest.raises(ScraperError, match="Auth error"):
                 scrape_account("baduser", "fake_token", max_items=5, retries=0)
 
@@ -228,7 +228,7 @@ class TestScraperError:
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.return_value = items
 
-        with patch("collection.scraper.requests.post", return_value=mock_resp):
+        with patch("collection.sources.apify.requests.post", return_value=mock_resp):
             result, job_id = scrape_account("gooduser", "fake_token", max_items=5, retries=0)
 
         assert len(result) == 2
