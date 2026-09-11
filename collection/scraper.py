@@ -2,8 +2,6 @@
 Scraping engine — wraps Apify's instagram-reel-scraper actor.
 Handles: API call, response parsing, DB upsert, audit logging.
 """
-import requests
-import time
 from datetime import datetime
 from typing import List, Tuple, Optional
 
@@ -21,6 +19,10 @@ import duckdb
 
 ACTOR_ID = "apify~instagram-reel-scraper"
 DB_PATH = "reels.duckdb"
+
+
+from collection.sources.apify import ApifyError, ApifySource
+from collection.sources.base import ReelRecord
 
 
 class ScraperError(Exception):
@@ -44,41 +46,30 @@ def scrape_account(
         ScraperError on non-retryable failures.
     """
     job_id = start_scrape_job(username, client_id)
-    url = (
-        f"https://api.apify.com/v2/acts/{ACTOR_ID}"
-        f"/run-sync-get-dataset-items?token={apify_token}"
+    source = ApifySource(apify_token, retries=retries)
+    try:
+        items = source.fetch_raw(username, max_items)
+    except ApifyError as exc:
+        finish_scrape_job(job_id, 0, 0, "failed", str(exc))
+        raise ScraperError(str(exc)) from exc
+    return items, job_id
+
+
+def fetch_records(
+    username: str,
+    apify_token: str,
+    max_items: int = 50,
+    retries: int = 2,
+) -> List[ReelRecord]:
+    """Fetch reels as normalised ReelRecords.
+
+    Prefer this over scrape_account() for new code: it is source-agnostic and
+    distinguishes a field the source did not supply from a genuine zero.
+    Does not touch the database.
+    """
+    return ApifySource(apify_token, retries=retries).fetch_account_reels(
+        username, max_items
     )
-    payload = {
-        "username": [f"https://www.instagram.com/{username}/"],
-        "resultsLimit": max_items,
-        "skipPinnedPosts": False,
-        "includeSharesCount": False,
-    }
-
-    last_error = None
-    for attempt in range(retries + 1):
-        try:
-            resp = requests.post(url, json=payload, timeout=120)
-            resp.raise_for_status()
-            items = resp.json()
-            if not isinstance(items, list):
-                raise ScraperError(f"Unexpected response format: {type(items)}")
-            return items, job_id
-        except requests.exceptions.HTTPError as e:
-            last_error = str(e)
-            if resp.status_code in (401, 403):
-                # Auth errors — no point retrying
-                finish_scrape_job(job_id, 0, 0, "failed", last_error)
-                raise ScraperError(f"Auth error for @{username}: {last_error}")
-            if attempt < retries:
-                time.sleep(2 ** attempt)   # 1s, 2s backoff
-        except Exception as e:
-            last_error = str(e)
-            if attempt < retries:
-                time.sleep(2 ** attempt)
-
-    finish_scrape_job(job_id, 0, 0, "failed", last_error)
-    raise ScraperError(f"Failed to scrape @{username} after {retries+1} attempts: {last_error}")
 
 
 def process_and_store(
