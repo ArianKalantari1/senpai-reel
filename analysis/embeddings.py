@@ -8,7 +8,7 @@ Stores FLOAT[1536] in message_units.embedding.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Tuple
 
 import requests
 
@@ -27,14 +27,20 @@ def embed_text(text: str, api_key: str) -> List[float]:
 
 
 def embed_batch(texts: List[str], api_key: str) -> List[List[float]]:
+    embeddings, _, _ = embed_batch_with_usage(texts, api_key)
+    return embeddings
+
+
+def embed_batch_with_usage(texts: List[str], api_key: str) -> Tuple[List[List[float]], int, float]:
     """
     Batch-embed up to _BATCH_SIZE texts in a single API call.
     Automatically splits larger lists into sub-batches.
     """
     if not texts:
-        return []
+        return [], 0, 0.0
 
     all_embeddings: List[List[float]] = []
+    total_tokens = 0
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
     for i in range(0, len(texts), _BATCH_SIZE):
@@ -50,8 +56,10 @@ def embed_batch(texts: List[str], api_key: str) -> List[List[float]]:
         resp.raise_for_status()
         data = resp.json()
         all_embeddings.extend([d["embedding"] for d in data["data"]])
+        total_tokens += int(data.get("usage", {}).get("total_tokens") or 0)
 
-    return all_embeddings
+    total_cost = round(total_tokens * _EMBED_COST_PER_TOKEN, 8)
+    return all_embeddings, total_tokens, total_cost
 
 
 def embed_pending_units(
@@ -88,19 +96,24 @@ def embed_pending_units(
     total = len(rows)
 
     try:
-        embeddings = embed_batch(texts, api_key)
+        embeddings, total_tokens, total_cost = embed_batch_with_usage(texts, api_key)
     except Exception as e:
         logger.error("Batch embedding failed: %s", e)
         return {"done": 0, "failed": total, "total": total, "error": str(e)}
 
     conn = get_connection()
     done = failed = 0
+    unit_cost = round(total_cost / len(embeddings), 8) if embeddings else 0.0
     try:
         for i, (unit_id, embedding) in enumerate(zip(unit_ids, embeddings)):
             try:
                 conn.execute(
-                    "UPDATE message_units SET embedding = ?, embedded_at = CURRENT_TIMESTAMP WHERE unit_id = ?",
-                    [embedding, unit_id],
+                    """
+                    UPDATE message_units
+                    SET embedding = ?, embedded_at = CURRENT_TIMESTAMP, embedding_cost_usd = ?
+                    WHERE unit_id = ?
+                    """,
+                    [embedding, unit_cost, unit_id],
                 )
                 done += 1
             except Exception as e:
@@ -111,4 +124,10 @@ def embed_pending_units(
     finally:
         conn.close()
 
-    return {"done": done, "failed": failed, "total": total}
+    return {
+        "done": done,
+        "failed": failed,
+        "total": total,
+        "total_tokens": total_tokens,
+        "total_cost_usd": round(unit_cost * done, 8),
+    }

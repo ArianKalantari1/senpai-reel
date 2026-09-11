@@ -139,7 +139,7 @@ CREATE TABLE scrape_jobs (
   - Scrape job progress bar (poll Apify run status)
   - Show "X new reels found" after each run
   - Display last scraped date per account
-- [ ] Add `pages/1_📊_Data_Viewer.py` — switch from `raw_scrapes` to `posts` table
+- [ ] Add `pages/Data_Viewer.py` — switch from `raw_scrapes` to `posts` table
 
 ### Acceptance Criteria
 - [ ] Batch scrape 5 accounts in a single Streamlit run without error
@@ -256,7 +256,7 @@ CREATE TABLE transcript_words (
   - Batches 10 at a time (configurable)
   - Updates DB after each transcription (not at end of batch — so partial runs succeed)
   - Tracks running cost total
-- [ ] Add `pages/3_📝_Corpus_Explorer.py` — new Streamlit page:
+- [ ] Add `pages/Corpus_Explorer.py` — new Streamlit page:
   - List all transcribed posts with search (keyword)
   - Full transcript view per post (side panel)
   - Transcription cost tracker (total spent, remaining free credits estimate)
@@ -273,7 +273,7 @@ CREATE TABLE transcript_words (
 ### Files created/modified
 - `processing/transcribe.py` — NEW
 - `processing/transcription_queue.py` — NEW
-- `pages/3_📝_Corpus_Explorer.py` — NEW
+- `pages/Corpus_Explorer.py` — NEW
 - `core/db.py` — new tables
 
 ---
@@ -355,7 +355,7 @@ CREATE TABLE message_units (
 - `analysis/extraction.py` — NEW
 - `analysis/taxonomy.py` — NEW
 - `processing/extraction_queue.py` — NEW
-- `pages/3_📝_Corpus_Explorer.py` — updated with filters
+- `pages/Corpus_Explorer.py` — updated with filters
 
 ---
 
@@ -415,7 +415,7 @@ LIMIT 20;
 - [ ] Create `analysis/search.py`:
   - `semantic_search(query, topic_filter, top_k) -> list[SearchResult]`
   - `SearchResult` dataclass: unit_id, post_id, username, topic, text, score
-- [ ] Add `pages/4_🔍_Search.py` — semantic search UI:
+- [ ] Add `pages/Search.py` — semantic search UI:
   - Query input box
   - Topic filter dropdown (taxonomy)
   - Results list with post thumbnail, creator, score, full text
@@ -433,7 +433,7 @@ LIMIT 20;
 - `analysis/embeddings.py` — NEW
 - `analysis/search.py` — NEW
 - `processing/embedding_queue.py` — NEW
-- `pages/4_🔍_Search.py` — NEW
+- `pages/Search.py` — NEW
 
 ---
 
@@ -456,7 +456,7 @@ LIMIT 20;
   - `get_content_gap_matrix()` → DataFrame (topic × content_type heatmap)
   - `get_creator_leaderboard()` → DataFrame
   - `get_top_posts(topic, limit)` → DataFrame
-- [ ] Add `pages/5_📊_Analytics.py` — 4-tab Streamlit dashboard:
+- [ ] Add `pages/Analytics.py` — 4-tab Streamlit dashboard:
   - Tab 1: Creator Leaderboard (bar chart + table)
   - Tab 2: Topic Distribution (pie + bar)
   - Tab 3: Content Gap Map (Plotly heatmap)
@@ -470,7 +470,7 @@ LIMIT 20;
 
 ### Files created/modified
 - `analysis/analytics.py` — NEW
-- `pages/5_📊_Analytics.py` — NEW
+- `pages/Analytics.py` — NEW
 - `pages/2_🤖_AI_Analytics.py` — retire or merge
 
 ---
@@ -501,7 +501,7 @@ Hashtags: #JobsAustralia #ATSTips #ResumeAdvice ...
   - `generate_script(topic, duration_sec=45, reference_units)` — GPT-4o call
   - All functions accept `reference_units: list[MessageUnit]` for context grounding
 - [ ] Create `analysis/prompts.py` — all system/user prompt templates (separate from logic)
-- [ ] Add `pages/6_✍️_Content_Studio.py`:
+- [ ] Add `pages/Content_Studio.py`:
   - Topic selector
   - Tone selector (professional / friendly / bold / educational)
   - Reference posts selector (multi-select from search results)
@@ -533,7 +533,7 @@ Hashtags: #JobsAustralia #ATSTips #ResumeAdvice ...
 ### Files created/modified
 - `analysis/content_gen.py` — NEW
 - `analysis/prompts.py` — NEW
-- `pages/6_✍️_Content_Studio.py` — NEW
+- `pages/Content_Studio.py` — NEW
 - `core/db.py` — `generated_content` table
 
 ---

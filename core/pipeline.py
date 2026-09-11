@@ -17,7 +17,8 @@ LOCK_STALE_AFTER = timedelta(hours=4)
 # running its `finally` — a closed browser tab, a restart, an OOM kill. That is
 # enough to *offer* a manual release; it is deliberately not enough to release
 # automatically, because a long single stage can legitimately go quiet.
-LOCK_ABANDONED_AFTER = timedelta(minutes=10)
+LOCK_ABANDONED_AFTER = timedelta(minutes=5)
+LOCK_HEARTBEAT_INTERVAL_SECONDS = 15
 CDN_EXPIRY_WARNING_HOURS = 18
 CDN_EXPIRY_HIGH_RISK_HOURS = 36
 
@@ -199,6 +200,21 @@ def release_pipeline_lock(run_id: str):
         )
     finally:
         conn.close()
+
+
+def _with_lock_heartbeat(run_id: str, callback: ProgressCallback) -> ProgressCallback:
+    last_heartbeat = 0.0
+
+    def _callback(event: dict):
+        nonlocal last_heartbeat
+        now = time.monotonic()
+        if now - last_heartbeat >= LOCK_HEARTBEAT_INTERVAL_SECONDS:
+            update_pipeline_lock(run_id, event.get("stage") or "Pipeline")
+            last_heartbeat = now
+        if callback:
+            callback(event)
+
+    return _callback
 
 
 def get_pending_download_expiry(client_id: str) -> dict:
@@ -632,19 +648,20 @@ def run_everything_pending(
 
     run_id = lock["run_id"]
     results = []
+    locked_progress = _with_lock_heartbeat(run_id, progress_callback)
     try:
         stage_calls = [
             (
                 "Scrape",
-                lambda: run_scrape_stage(client_id, apify_token, scrape_max_items, progress_callback),
+                lambda: run_scrape_stage(client_id, apify_token, scrape_max_items, locked_progress),
             ),
             (
                 "Download",
-                lambda: run_download_stage(client_id, download_batch_size, progress_callback),
+                lambda: run_download_stage(client_id, download_batch_size, locked_progress),
             ),
             (
                 "Audio",
-                lambda: run_audio_stage(client_id, progress_callback),
+                lambda: run_audio_stage(client_id, locked_progress),
             ),
             (
                 "Transcribe",
@@ -652,7 +669,7 @@ def run_everything_pending(
                     client_id,
                     deepgram_api_key,
                     batch_size=transcription_batch_size,
-                    progress_callback=progress_callback,
+                    progress_callback=locked_progress,
                 ),
             ),
             (
@@ -661,7 +678,7 @@ def run_everything_pending(
                     client_id,
                     openai_api_key,
                     batch_size=extraction_batch_size,
-                    progress_callback=progress_callback,
+                    progress_callback=locked_progress,
                 ),
             ),
             (
@@ -670,7 +687,7 @@ def run_everything_pending(
                     client_id,
                     openai_api_key,
                     batch_size=embedding_batch_size,
-                    progress_callback=progress_callback,
+                    progress_callback=locked_progress,
                 ),
             ),
         ]

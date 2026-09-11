@@ -156,6 +156,15 @@ class TestEmbedPendingUnits:
         assert result["total"] == 3
         assert result["done"] == 3
         assert result["failed"] == 0
+        assert result["total_tokens"] == 15
+        assert result["total_cost_usd"] > 0
+
+        conn = duckdb.connect(embed_db.DB_PATH)
+        stored = conn.execute(
+            "SELECT COALESCE(SUM(embedding_cost_usd), 0) FROM message_units"
+        ).fetchone()[0]
+        conn.close()
+        assert stored == pytest.approx(result["total_cost_usd"])
 
     def test_api_failure_returns_failed_count(self, embed_db):
         from analysis.embeddings import embed_pending_units

@@ -675,6 +675,7 @@ senpai-reel/
 │   ├── Onboarding.py               # First-run client/account setup
 │   ├── Pipeline.py                 # One-click scrape-to-embeddings pipeline
 │   ├── Settings.py                 # Session-scoped API key setup
+│   ├── Costs.py                    # Per-client cost meter
 │   ├── Data_Viewer.py              # Main data exploration table
 │   ├── Corpus_Explorer.py          # Transcripts and word timestamps
 │   ├── Search.py                   # Keyword and semantic search
