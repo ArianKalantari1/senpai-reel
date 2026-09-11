@@ -68,10 +68,10 @@ class TestGetExtractionStats:
         # Add a message_unit for t2
         conn = duckdb.connect(queue_db.DB_PATH)
         conn.execute("""
-            INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
+            INSERT INTO message_units (unit_id, client_id, post_id, text, claim, topic, content_type,
                 confidence, extracted_at, model)
-            VALUES (?, 't2', 'tip', 'claim', 'Resume', 'tip', 0.9, CURRENT_TIMESTAMP, 'gpt-4o-mini')
-        """, (str(uuid.uuid4()),))
+            VALUES (?, ?, 't2', 'tip', 'claim', 'Resume', 'tip', 0.9, CURRENT_TIMESTAMP, 'gpt-4o-mini')
+        """, (str(uuid.uuid4()), queue_db.DEFAULT_CLIENT_ID))
         conn.close()
 
         stats = get_extraction_stats()
@@ -156,10 +156,10 @@ class TestRunExtractionQueue:
         # Pre-seed a message_unit so this post is already extracted
         conn = duckdb.connect(queue_db.DB_PATH)
         conn.execute("""
-            INSERT INTO message_units (unit_id, post_id, text, claim, topic, content_type,
+            INSERT INTO message_units (unit_id, client_id, post_id, text, claim, topic, content_type,
                 confidence, extracted_at, model)
-            VALUES (?, 'skip1', 'text', 'claim', 'Resume', 'tip', 0.9, CURRENT_TIMESTAMP, 'gpt-4o-mini')
-        """, (str(uuid.uuid4()),))
+            VALUES (?, ?, 'skip1', 'text', 'claim', 'Resume', 'tip', 0.9, CURRENT_TIMESTAMP, 'gpt-4o-mini')
+        """, (str(uuid.uuid4()), queue_db.DEFAULT_CLIENT_ID))
         conn.close()
 
         with patch("processing.extraction_queue.extract_message_units") as mock_extract:

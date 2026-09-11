@@ -319,9 +319,9 @@ def get_pipeline_snapshot(client_id: str) -> dict:
                 SUM(CASE WHEN mu.embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded_units
             FROM message_units mu
             JOIN client_posts cp ON mu.post_id = cp.post_id
-            WHERE cp.client_id = ?
+            WHERE cp.client_id = ? AND mu.client_id = ?
             """,
-            [client_id],
+            [client_id, client_id],
         ).fetchone()
         generated = conn.execute(
             "SELECT COUNT(*) FROM generated_content WHERE client_id = ?",
