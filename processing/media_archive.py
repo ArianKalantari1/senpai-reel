@@ -16,6 +16,7 @@ from processing.concurrency import run_db_write
 logger = logging.getLogger(__name__)
 
 ARCHIVE_ENV = "SENPAI_ARCHIVE_DIR"
+KEYFRAME_HWACCEL_ENV = "SENPAI_FFMPEG_HWACCEL"
 KEYFRAMES_DIR = Path("keyframes")
 DEFAULT_KEYFRAME_COUNT = 12
 
@@ -95,10 +96,13 @@ def extract_keyframes(
     duration = _probe_duration(src)
     fps_expr = f"{frame_count}/{duration:.3f}" if duration else "1/3"
     vf = f"fps={fps_expr},scale='min(540,iw)':-2"
+    selected_hwaccel = hwaccel
+    if selected_hwaccel is None:
+        selected_hwaccel = os.getenv(KEYFRAME_HWACCEL_ENV, "").strip() or None
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-    if hwaccel:
-        cmd.extend(["-hwaccel", hwaccel])
+    if selected_hwaccel:
+        cmd.extend(["-hwaccel", selected_hwaccel])
     cmd.extend(
         [
             "-i",

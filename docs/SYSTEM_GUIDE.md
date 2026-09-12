@@ -11,7 +11,8 @@ Senpai Reel scrapes up to 23 competitor Instagram accounts in the **Jobs-in-Aust
 
 ## The full pipeline (what happens under the hood)
 
-There are **5 sequential stages**. Data flows forward — you must complete each stage before the next one has anything to work with.
+Data flows forward through the operational stages below. Each stage only works
+on the active client.
 
 ```
 Instagram Accounts
@@ -26,7 +27,13 @@ Instagram Accounts
 [Stage 2b] EXTRACT AUDIO  ffmpeg → 16kHz mono .wav files on disk
       │
       ▼
+[Stage 2c] EXTRACT FRAMES ffmpeg → compact JPEG keyframes on disk
+      │
+      ▼
 [Stage 3] TRANSCRIBE      Deepgram Nova-2 → full text + word timestamps in DB
+      │
+      ▼
+[Stage 3b] ARCHIVE VIDEO  move processed source .mp4 to external archive, if configured
       │
       ▼
 [Stage 4] EXTRACT         GPT-4o-mini → "message units" (structured knowledge) in DB
@@ -94,9 +101,11 @@ For every post with `download_status = 'pending'`, downloads the `video_url` CDN
 **Important timing issue:**  
 Apify CDN URLs expire after ~24–48 hours. If you scrape but don't download within that window, the direct HTTP method will fail. yt-dlp may still work by fetching a fresh URL, but is slower and less reliable.
 
-**Audio extraction (`processing/audio.py`):**  
-Runs as a sub-step after download. Calls `ffmpeg` to convert `.mp4` → 16kHz mono `.wav` in `audio_extracts/`. This specific format is required by Deepgram. 
+**Audio and keyframe extraction (`processing/audio.py`, `processing/media_archive.py`):**
+Runs as a sub-step after download. Calls `ffmpeg` to convert `.mp4` → 16kHz mono `.wav` in `audio_extracts/`. This specific format is required by Deepgram. It also extracts a compact local keyframe set to `keyframes/{post_id}/` so later visual/OCR work can use the editing reference without keeping the source video in the working directory.
 **ffmpeg must be installed:** `brew install ffmpeg` (path: `/opt/homebrew/bin/ffmpeg`)
+
+Once audio, keyframes, and transcript exist, the source video is eligible for archiving. If `SENPAI_ARCHIVE_DIR` is unset or the external drive is disconnected, archiving is skipped and the `.mp4` remains in `downloads/`. The pipeline continues normally and does not mark the post archived. When the archive target is reachable, the source video is moved to the archive and `posts.archived_video_path` records where it went.
 
 ---
 
@@ -182,14 +191,15 @@ Client-scoped pipeline dashboard with one-click operation:
 |-------|---------|
 | Scrape | Scrape configured competitor accounts |
 | Download | Download pending Apify media URLs |
-| Audio | Extract WAV audio from downloaded MP4s |
+| Audio | Extract WAV audio and keyframes from downloaded MP4s |
 | Transcribe | Run the Deepgram queue |
+| Archive | Move processed source MP4s to `SENPAI_ARCHIVE_DIR`, if reachable |
 | Extract units | Run knowledge extraction |
 | Embed | Run semantic embeddings |
 
 The **Run Everything Pending** button chains those stages in dependency order. It uses a DuckDB-backed `pipeline_locks` row so only one write-heavy pipeline run can operate at a time, and it shows a clear busy state on other write pages. If a process dies mid-run, the Pipeline page shows lock age, last heartbeat, and a force-release control once the heartbeat is stale.
 
-Item-level queues run with bounded workers. I/O-bound work (downloads, Deepgram, OpenAI extraction) defaults to 8 workers via `SENPAI_IO_WORKERS`; CPU-heavy ffmpeg audio extraction defaults to 2 workers via `SENPAI_CPU_WORKERS`. DuckDB writes are serialized behind a shared writer lock.
+Item-level queues run with bounded workers. I/O-bound work (downloads, Deepgram, OpenAI extraction) defaults to 8 workers via `SENPAI_IO_WORKERS`; CPU-heavy ffmpeg extraction defaults to 2 workers via `SENPAI_CPU_WORKERS`. DuckDB writes are serialized behind a shared writer lock.
 
 The page also warns when pending downloads are approaching Apify CDN expiry. URLs older than roughly 18 hours are flagged because media links commonly expire within 24–48 hours.
 
@@ -318,7 +328,7 @@ All outputs are saved to the `generated_content` table automatically.
 | `raw_scrapes` | 1 | Raw JSON blobs as returned by Apify |
 | `profiles` | 1 | Legacy: one row per scrape run summary |
 | `creator_accounts` | 1 | One row per Instagram account (bio, followers, etc.) |
-| `posts` | 1–2 | One row per reel (canonical, includes download + audio paths) |
+| `posts` | 1–3b | One row per reel (canonical, includes download, audio, keyframe, and archive paths) |
 | `scrape_jobs` | 1 | Audit log of every scrape run (status, counts, errors, Apify cost) |
 | `reels` | 1 | Legacy structured reels (kept for old pages compatibility) |
 | `comments` | 1 | Reel comments (recursive, supports replies) |
@@ -349,7 +359,9 @@ Optional worker-limit environment variables:
 
 ```bash
 SENPAI_IO_WORKERS=8     # Downloads, Deepgram, OpenAI extraction
-SENPAI_CPU_WORKERS=2    # ffmpeg audio extraction
+SENPAI_CPU_WORKERS=2    # ffmpeg audio/keyframe extraction
+SENPAI_ARCHIVE_DIR=/Volumes/SenpaiArchive  # Optional external source-video archive
+SENPAI_FFMPEG_HWACCEL=videotoolbox         # Optional; benchmark before enabling
 ```
 
 If any key is missing:
@@ -381,6 +393,7 @@ Empty states on each page point back to the Pipeline stage that fills the missin
 | Issue | Severity | Notes |
 |-------|----------|-------|
 | Apify CDN URLs expire in ~24–48h | Medium | Pipeline and Download Queue warn when pending media URLs are getting old |
+| External archive drive disconnected | Low | Archive stage skips cleanly and leaves source videos in `downloads/`; it never records an archive path unless the move succeeds. |
 | DuckDB lock conflict | Medium | Pipeline runs use `pipeline_locks`; write pages show a busy state while a run is active. Pipeline can force-release a stale heartbeat. |
 | `use_container_width` warnings | Low | Fixed in latest commit — cosmetic only |
 | WAL file growth | Low | `reels.duckdb.wal` will grow with each write session. No auto-checkpoint UI. |

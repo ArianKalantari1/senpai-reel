@@ -52,8 +52,8 @@ streamlit run app.py
 1. **Client** (sidebar) — pick or create one. Each client is a separate niche
    with its own competitor accounts and its own topic vocabulary.
 2. **Pipeline** — add a competitor handle, then **Run everything pending**.
-   It chains scrape → download → audio → transcribe → extract → embed, with
-   live counts at each stage.
+   It chains scrape → download → audio/keyframes → transcribe → archive →
+   extract → embed, with live counts at each stage.
 3. **Search**, **Analytics**, **Content Studio** — what the data is for.
 
 First run on one account takes a few minutes, most of it scraping and
@@ -78,6 +78,7 @@ which is gigabytes, and nothing in the running app imports it.
 |---|---|
 | Transcription does nothing | `DEEPGRAM_API_KEY` missing — check Settings |
 | Downloads fail on older reels | Apify CDN links expire in 24–48h; scrape and download together |
+| Videos keep filling `downloads/` | set `SENPAI_ARCHIVE_DIR` to an external drive; if it is disconnected, videos stay put and the pipeline keeps running |
 | "Pipeline busy" that never clears | a run was interrupted; the Pipeline page offers a force release once its heartbeat goes stale |
 | Everything classifies as "General" | that client has no topics yet — add them for its niche |
 

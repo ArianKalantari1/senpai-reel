@@ -129,9 +129,9 @@ class InstagramVideoGraphIntegrator:
             # Step 4: Store analysis results in DuckDB
             self.store_graph_analysis_results(post_id, video_data, graph_result, signature)
             
-            # Step 5: Clean up video file to save space
-            Path(video_path).unlink(missing_ok=True)
-            print(f"Cleaned up video file: {video_path}")
+            # Source videos are research material. The archive pipeline owns
+            # moving them out of the working directory; graph analysis only reads.
+            print(f"Video file retained: {video_path}")
             
             return {
                 'post_id': post_id,
