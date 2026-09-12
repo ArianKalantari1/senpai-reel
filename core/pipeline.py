@@ -319,9 +319,9 @@ def get_pipeline_snapshot(client_id: str) -> dict:
                 SUM(CASE WHEN mu.embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded_units
             FROM message_units mu
             JOIN client_posts cp ON mu.post_id = cp.post_id
-            WHERE cp.client_id = ?
+            WHERE cp.client_id = ? AND mu.client_id = ?
             """,
-            [client_id],
+            [client_id, client_id],
         ).fetchone()
         generated = conn.execute(
             "SELECT COUNT(*) FROM generated_content WHERE client_id = ?",
@@ -441,6 +441,7 @@ def run_download_stage(
     client_id: str,
     batch_size: int = 500,
     progress_callback: ProgressCallback = None,
+    io_workers: Optional[int] = None,
 ) -> dict:
     stage = "Download"
     started = time.monotonic()
@@ -450,7 +451,12 @@ def run_download_stage(
     def _download_progress(done, total, post_id):
         _emit(progress_callback, started, stage, done, total, post_id, f"Downloading {post_id}")
 
-    result = download_pending_posts(batch_size=batch_size, progress_callback=_download_progress, client_id=client_id)
+    result = download_pending_posts(
+        batch_size=batch_size,
+        progress_callback=_download_progress,
+        client_id=client_id,
+        max_workers=io_workers,
+    )
     status = "failed" if result["total"] and result["failed"] and not result["done"] else "done"
     if result["total"] == 0:
         status = "skipped"
@@ -464,7 +470,11 @@ def run_download_stage(
     )
 
 
-def run_audio_stage(client_id: str, progress_callback: ProgressCallback = None) -> dict:
+def run_audio_stage(
+    client_id: str,
+    progress_callback: ProgressCallback = None,
+    cpu_workers: Optional[int] = None,
+) -> dict:
     stage = "Audio"
     started = time.monotonic()
 
@@ -473,7 +483,11 @@ def run_audio_stage(client_id: str, progress_callback: ProgressCallback = None) 
     def _audio_progress(done, total, post_id):
         _emit(progress_callback, started, stage, done, total, post_id, f"Extracting audio for {post_id}")
 
-    result = extract_audio_for_downloaded_posts(progress_callback=_audio_progress, client_id=client_id)
+    result = extract_audio_for_downloaded_posts(
+        progress_callback=_audio_progress,
+        client_id=client_id,
+        max_workers=cpu_workers,
+    )
     status = "failed" if result["total"] and result["failed"] and not result["done"] else "done"
     if result["total"] == 0:
         status = "skipped"
@@ -493,6 +507,7 @@ def run_transcription_stage(
     provider: str = "deepgram",
     batch_size: int = 500,
     progress_callback: ProgressCallback = None,
+    io_workers: Optional[int] = None,
 ) -> dict:
     stage = "Transcribe"
     started = time.monotonic()
@@ -518,6 +533,7 @@ def run_transcription_stage(
         batch_size=batch_size,
         progress_callback=_transcription_progress,
         client_id=client_id,
+        max_workers=io_workers,
     )
     status = "failed" if result["total"] and result["failed"] and not result["done"] else "done"
     if result["total"] == 0:
@@ -539,6 +555,7 @@ def run_extraction_stage(
     openai_api_key: str,
     batch_size: int = 500,
     progress_callback: ProgressCallback = None,
+    io_workers: Optional[int] = None,
 ) -> dict:
     stage = "Extract"
     started = time.monotonic()
@@ -564,6 +581,7 @@ def run_extraction_stage(
         batch_size=batch_size,
         progress_callback=_extraction_progress,
         client_id=client_id,
+        max_workers=io_workers,
     )
     status = "failed" if result["total"] and result["failed"] and not result["done"] else "done"
     if result["total"] == 0:
@@ -635,6 +653,8 @@ def run_everything_pending(
     transcription_batch_size: int = 500,
     extraction_batch_size: int = 500,
     embedding_batch_size: int = 1000,
+    io_workers: Optional[int] = None,
+    cpu_workers: Optional[int] = None,
     progress_callback: ProgressCallback = None,
 ) -> dict:
     lock = try_start_pipeline_run(client_id)
@@ -657,11 +677,20 @@ def run_everything_pending(
             ),
             (
                 "Download",
-                lambda: run_download_stage(client_id, download_batch_size, locked_progress),
+                lambda: run_download_stage(
+                    client_id,
+                    download_batch_size,
+                    locked_progress,
+                    io_workers=io_workers,
+                ),
             ),
             (
                 "Audio",
-                lambda: run_audio_stage(client_id, locked_progress),
+                lambda: run_audio_stage(
+                    client_id,
+                    locked_progress,
+                    cpu_workers=cpu_workers,
+                ),
             ),
             (
                 "Transcribe",
@@ -670,6 +699,7 @@ def run_everything_pending(
                     deepgram_api_key,
                     batch_size=transcription_batch_size,
                     progress_callback=locked_progress,
+                    io_workers=io_workers,
                 ),
             ),
             (
@@ -679,6 +709,7 @@ def run_everything_pending(
                     openai_api_key,
                     batch_size=extraction_batch_size,
                     progress_callback=locked_progress,
+                    io_workers=io_workers,
                 ),
             ),
             (

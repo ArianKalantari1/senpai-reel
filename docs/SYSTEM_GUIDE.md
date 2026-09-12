@@ -189,6 +189,8 @@ Client-scoped pipeline dashboard with one-click operation:
 
 The **Run Everything Pending** button chains those stages in dependency order. It uses a DuckDB-backed `pipeline_locks` row so only one write-heavy pipeline run can operate at a time, and it shows a clear busy state on other write pages. If a process dies mid-run, the Pipeline page shows lock age, last heartbeat, and a force-release control once the heartbeat is stale.
 
+Item-level queues run with bounded workers. I/O-bound work (downloads, Deepgram, OpenAI extraction) defaults to 8 workers via `SENPAI_IO_WORKERS`; CPU-heavy ffmpeg audio extraction defaults to 2 workers via `SENPAI_CPU_WORKERS`. DuckDB writes are serialized behind a shared writer lock.
+
 The page also warns when pending downloads are approaching Apify CDN expiry. URLs older than roughly 18 hours are flagged because media links commonly expire within 24–48 hours.
 
 #### Onboarding (`pages/Onboarding.py`)
@@ -342,6 +344,13 @@ APIFY_USD_PER_RESULT = "0.0025"      # Optional; used for scrape-job cost captur
 ```
 
 Keys can also be pasted on the Settings page for the current Streamlit session.
+
+Optional worker-limit environment variables:
+
+```bash
+SENPAI_IO_WORKERS=8     # Downloads, Deepgram, OpenAI extraction
+SENPAI_CPU_WORKERS=2    # ffmpeg audio extraction
+```
 
 If any key is missing:
 - No `APIFY_TOKEN` → Scrape buttons explain that scraping needs Apify and link to Settings.

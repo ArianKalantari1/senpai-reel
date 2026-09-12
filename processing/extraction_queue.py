@@ -9,6 +9,7 @@ from typing import Callable, Optional
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
 from analysis.extraction import extract_message_units, save_message_units
+from processing.concurrency import io_worker_count, run_bounded, run_db_write
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +31,18 @@ def get_extraction_stats(client_id: str = DEFAULT_CLIENT_ID) -> dict:
             SELECT COUNT(DISTINCT mu.post_id)
             FROM message_units mu
             JOIN client_posts cp ON mu.post_id = cp.post_id
-            WHERE cp.client_id = ?
+            WHERE cp.client_id = ? AND mu.client_id = ?
             """,
-            [client_id],
+            [client_id, client_id],
         ).fetchone()[0]
         total_units = conn.execute(
             """
             SELECT COUNT(*)
             FROM message_units mu
             JOIN client_posts cp ON mu.post_id = cp.post_id
-            WHERE cp.client_id = ?
+            WHERE cp.client_id = ? AND mu.client_id = ?
             """,
-            [client_id],
+            [client_id, client_id],
         ).fetchone()[0]
         total_cost = conn.execute(
             """
@@ -71,6 +72,7 @@ def run_extraction_queue(
     batch_size: int = 10,
     progress_callback: Optional[Callable] = None,
     client_id: str = DEFAULT_CLIENT_ID,
+    max_workers: Optional[int] = None,
 ) -> dict:
     """
     Extract message units from transcripts not yet processed.
@@ -85,12 +87,14 @@ def run_extraction_queue(
         FROM transcripts t
         JOIN client_posts cp ON t.post_id = cp.post_id
         WHERE NOT EXISTS (
-            SELECT 1 FROM message_units mu WHERE mu.post_id = t.post_id
+            SELECT 1
+            FROM message_units mu
+            WHERE mu.post_id = t.post_id AND mu.client_id = ?
         )
           AND cp.client_id = ?
         LIMIT ?
         """,
-        [client_id, batch_size],
+        [client_id, client_id, batch_size],
     ).fetchall()
     conn.close()
 
@@ -99,26 +103,37 @@ def run_extraction_queue(
     total_units = 0
     total_cost = 0.0
 
-    for i, (post_id, transcript) in enumerate(rows):
-        try:
-            units, cost = extract_message_units(
-                transcript, post_id, openai_api_key, client_id=client_id
-            )
-            for unit in units:
-                unit.client_id = client_id
-            save_message_units(units, client_id)
-            # Track cost in transcripts table
-            _update_extraction_cost(post_id, cost)
-            done += 1
-            total_units += len(units)
-            total_cost += cost
-            if progress_callback:
-                progress_callback(i + 1, total, post_id, None, len(units))
-        except Exception as e:
+    def _extract(row):
+        post_id, transcript = row
+        units, cost = extract_message_units(
+            transcript, post_id, openai_api_key, client_id=client_id
+        )
+        for unit in units:
+            unit.client_id = client_id
+        run_db_write(_save_extraction_result, units, client_id, post_id, cost)
+        return {"units": len(units), "cost": cost}
+
+    def _progress(count, count_total, row, result, error):
+        unit_count = result["units"] if result else 0
+        if progress_callback:
+            progress_callback(count, count_total, row[0], str(error) if error else None, unit_count)
+
+    completed = run_bounded(
+        rows,
+        _extract,
+        max_workers=io_worker_count(max_workers),
+        progress_callback=_progress,
+    )
+
+    for item in completed:
+        post_id = item.item[0]
+        if item.error:
             failed += 1
-            logger.warning("Extraction failed for %s: %s", post_id, e)
-            if progress_callback:
-                progress_callback(i + 1, total, post_id, str(e), 0)
+            logger.warning("Extraction failed for %s: %s", post_id, item.error)
+        else:
+            done += 1
+            total_units += item.result["units"]
+            total_cost += item.result["cost"]
 
     return {
         "done": done,
@@ -139,3 +154,9 @@ def _update_extraction_cost(post_id: str, cost: float):
         conn.close()
     except Exception:
         pass  # column might not exist yet — migration will add it
+
+
+def _save_extraction_result(units, client_id: str, post_id: str, cost: float):
+    save_message_units(units, client_id)
+    # Track cost in transcripts table
+    _update_extraction_cost(post_id, cost)

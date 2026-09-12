@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
+from processing.concurrency import cpu_worker_count, run_bounded, run_db_write
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +107,10 @@ def extract_audio_for_post(post_id: str, client_id: str = DEFAULT_CLIENT_ID) -> 
 
 
 def _update_audio_path(post_id: str, audio_path: str):
+    run_db_write(_write_audio_path, post_id, audio_path)
+
+
+def _write_audio_path(post_id: str, audio_path: str):
     try:
         conn = get_connection()
         conn.execute(
@@ -120,6 +125,7 @@ def _update_audio_path(post_id: str, audio_path: str):
 def extract_audio_for_downloaded_posts(
     progress_callback=None,
     client_id: str = DEFAULT_CLIENT_ID,
+    max_workers: int | None = None,
 ) -> dict:
     """
     Extract audio for all posts that are downloaded but missing audio.
@@ -145,15 +151,34 @@ def extract_audio_for_downloaded_posts(
     total = len(rows)
     done = failed = 0
 
-    for i, (post_id, video_path) in enumerate(rows):
+    def _extract(row):
+        post_id, video_path = row
         result = extract_audio(video_path)
         if result["success"]:
             _update_audio_path(post_id, result["path"])
+        return result
+
+    def _progress(count, count_total, row, result, error):
+        if progress_callback:
+            progress_callback(count, count_total, row[0])
+
+    completed = run_bounded(
+        rows,
+        _extract,
+        max_workers=cpu_worker_count(max_workers),
+        progress_callback=_progress,
+    )
+
+    for item in completed:
+        post_id = item.item[0]
+        result = item.result or {}
+        if item.error:
+            failed += 1
+            logger.warning("Audio extraction failed for %s: %s", post_id, item.error)
+        elif result.get("success"):
             done += 1
         else:
             failed += 1
-            logger.warning("Audio extraction failed for %s: %s", post_id, result["error"])
-        if progress_callback:
-            progress_callback(i + 1, total, post_id)
+            logger.warning("Audio extraction failed for %s: %s", post_id, result.get("error"))
 
     return {"done": done, "failed": failed, "total": total}

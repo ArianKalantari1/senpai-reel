@@ -7,12 +7,12 @@ Falls back to yt-dlp if the direct download returns a non-video content type.
 
 import os
 import logging
-import time
 from pathlib import Path
 import requests
 import yt_dlp
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
+from processing.concurrency import io_worker_count, run_bounded, run_db_write
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,10 @@ def download_video(post_id: str, video_url: str, output_dir: str = "downloads") 
 
 def _update_db(post_id: str, status: str, path, size_mb):
     """Write download status back to posts table."""
+    run_db_write(_write_download_status, post_id, status, path, size_mb)
+
+
+def _write_download_status(post_id: str, status: str, path, size_mb):
     try:
         conn = get_connection()
         if path:
@@ -134,6 +138,7 @@ def download_pending_posts(
     batch_size: int = 20,
     progress_callback=None,
     client_id: str = DEFAULT_CLIENT_ID,
+    max_workers: int | None = None,
 ) -> dict:
     """
     Download all posts with download_status = 'pending'.
@@ -163,16 +168,35 @@ def download_pending_posts(
 
     total = len(rows)
     done = failed = 0
+    errors = []
 
-    for i, (post_id, video_url) in enumerate(rows):
-        result = download_video(post_id, video_url)
-        if result["success"]:
+    def _download(row):
+        post_id, video_url = row
+        return download_video(post_id, video_url)
+
+    def _progress(count, count_total, row, result, error):
+        if progress_callback:
+            progress_callback(count, count_total, row[0])
+
+    completed = run_bounded(
+        rows,
+        _download,
+        max_workers=io_worker_count(max_workers),
+        progress_callback=_progress,
+    )
+
+    for item in completed:
+        post_id = item.item[0]
+        result = item.result or {}
+        if item.error:
+            failed += 1
+            err_msg = str(item.error)
+            errors.append({"post_id": post_id, "error": err_msg})
+            logger.warning("Download failed for %s: %s", post_id, err_msg)
+        elif result.get("success"):
             done += 1
         else:
             failed += 1
-        if progress_callback:
-            progress_callback(i + 1, total, post_id)
-        if i < total - 1:
-            time.sleep(0.3)  # small delay between downloads
+            errors.append({"post_id": post_id, "error": result.get("error")})
 
-    return {"done": done, "failed": failed, "skipped": 0, "total": total}
+    return {"done": done, "failed": failed, "skipped": 0, "total": total, "errors": errors}
