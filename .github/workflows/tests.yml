@@ -1,0 +1,43 @@
+name: tests
+
+# Every "N passed" in this repo used to be a human or an agent reporting a
+# number nobody could check. This runs the suite where the result is a fact.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # setup.sh requires 3.10+; 3.11 is what a fresh setup.sh run installs against.
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # A system dependency, not a pip one. Without it tests/test_media_archive.py
+      # skips its only real keyframe-extraction case and the suite still reports
+      # green — a pass that silently covers less than it appears to.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+
+      # Deliberately requirements.txt only, never requirements-optional.txt.
+      # A clean install is the thing under test: senpai-reel#15 existed because
+      # pandas was missing here and the Analytics page broke on import.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q --ignore=tests/test.py
