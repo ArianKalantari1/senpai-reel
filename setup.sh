@@ -14,16 +14,48 @@ echo "${BOLD}Senpai Reel setup${OFF}"
 echo
 
 # ── Python ────────────────────────────────────────────────────────────────────
-if ! command -v python3 >/dev/null 2>&1; then
-  fail "python3 not found. Install Python 3.10+ and re-run."
+# The floor is 3.10 for syntax. The CEILING matters just as much: several
+# dependencies (pyarrow via streamlit, duckdb) ship prebuilt wheels only up to
+# a given Python, and pip silently falls back to compiling from source on
+# anything newer. That fails minutes later with "command 'cmake' failed",
+# which looks like a broken toolchain rather than the wrong interpreter.
+#
+# So rather than accept whatever `python3` happens to be, look for one that
+# actually works. Override with SENPAI_PYTHON=/path/to/python3.12 if needed.
+PY_MIN_MINOR=10
+PY_MAX_MINOR=13   # highest MINOR known to have wheels for every dependency
+
+_py_ok() {
+  # usable = exists, and 3.PY_MIN_MINOR <= version <= 3.PY_MAX_MINOR
+  command -v "$1" >/dev/null 2>&1 || return 1
+  "$1" -c "import sys
+lo, hi = ${PY_MIN_MINOR}, ${PY_MAX_MINOR}
+sys.exit(0 if sys.version_info[0] == 3 and lo <= sys.version_info[1] <= hi else 1)" 2>/dev/null
+}
+
+PYTHON=""
+for candidate in "${SENPAI_PYTHON:-}" python3.12 python3.11 python3.13 python3.10 python3; do
+  [ -n "$candidate" ] || continue
+  if _py_ok "$candidate"; then PYTHON="$candidate"; break; fi
+done
+
+if [ -z "$PYTHON" ]; then
+  fail "No suitable Python found. Need 3.${PY_MIN_MINOR} to 3.${PY_MAX_MINOR}."
+  if command -v python3 >/dev/null 2>&1; then
+    echo "    Your default python3 is $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')."
+    echo "    Newer is not better here — dependencies have no wheels for it yet,"
+    echo "    so pip tries to compile them from source and fails on cmake."
+  fi
+  if [[ "$OSTYPE" == darwin* ]]; then
+    echo "    Install one with:  brew install python@3.12"
+  else
+    echo "    Install one with:  sudo apt install python3.12 python3.12-venv"
+  fi
+  echo "    Or point at an existing one:  SENPAI_PYTHON=/path/to/python3.12 ./setup.sh"
   exit 1
 fi
-PY_VER=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)'; then
-  fail "Python ${PY_VER} found, but 3.10+ is required."
-  exit 1
-fi
-ok "python3 ${PY_VER}"
+PY_VER=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+ok "python ${PY_VER} (${PYTHON})"
 
 # ── ffmpeg (system dependency, not pip) ───────────────────────────────────────
 # Needed to turn downloaded video into the 16kHz mono wav Deepgram expects.
@@ -43,10 +75,23 @@ fi
 
 # ── Virtual environment ───────────────────────────────────────────────────────
 if [ ! -d .venv ]; then
-  python3 -m venv .venv
-  ok "created .venv"
+  "$PYTHON" -m venv .venv
+  ok "created .venv with python ${PY_VER}"
 else
-  ok ".venv already exists"
+  # An existing .venv may have been built with a different interpreter — the
+  # check above says nothing about it. Verify the one we are about to install
+  # into, since that is what pip will actually use.
+  VENV_VER=$(.venv/bin/python -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "unknown")
+  if .venv/bin/python -c "import sys
+lo, hi = ${PY_MIN_MINOR}, ${PY_MAX_MINOR}
+sys.exit(0 if sys.version_info[0] == 3 and lo <= sys.version_info[1] <= hi else 1)" 2>/dev/null; then
+    ok ".venv already exists (python ${VENV_VER})"
+  else
+    fail "Existing .venv uses python ${VENV_VER}, outside 3.${PY_MIN_MINOR}-3.${PY_MAX_MINOR}."
+    echo "    Installing into it would fail while building wheels from source."
+    echo "    Rebuild it:  rm -rf .venv && ./setup.sh"
+    exit 1
+  fi
 fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
