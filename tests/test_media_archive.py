@@ -166,6 +166,70 @@ def test_archive_moves_video_and_records_location(media_db, tmp_path):
     assert row[2] is not None
 
 
+def test_archive_sweep_reconciles_video_moved_before_db_update(media_db, tmp_path):
+    from processing.media_archive import archive_ready_videos, archive_video_if_ready
+
+    seeded = _seed_ready_post(media_db, tmp_path, "crashed_after_move")
+    old_local_path = str(seeded["video_path"])
+    archive_root = tmp_path / "external_archive"
+    archive_root.mkdir()
+
+    first = archive_video_if_ready(
+        "crashed_after_move",
+        client_id=seeded["client_id"],
+        archive_dir=str(archive_root),
+    )
+    assert first["status"] == "archived"
+    archived_path = Path(first["path"])
+    assert archived_path.exists()
+    assert not seeded["video_path"].exists()
+
+    conn = duckdb.connect(media_db.DB_PATH)
+    try:
+        conn.execute(
+            """
+            UPDATE posts
+            SET local_video_path = ?,
+                archived_video_path = NULL,
+                video_archived_at = NULL
+            WHERE post_id = 'crashed_after_move'
+            """,
+            [old_local_path],
+        )
+    finally:
+        conn.close()
+
+    repaired = archive_ready_videos(
+        client_id=seeded["client_id"],
+        archive_dir=str(archive_root),
+    )
+
+    assert repaired["reconciled"] == 1
+    assert repaired["archived"] == 0
+    assert repaired["total"] == 0
+    assert archived_path.exists()
+    assert archived_path.read_bytes() == b"video"
+
+    conn = duckdb.connect(media_db.DB_PATH)
+    row = conn.execute(
+        """
+        SELECT local_video_path, archived_video_path, video_archived_at
+        FROM posts
+        WHERE post_id = 'crashed_after_move'
+        """
+    ).fetchone()
+    conn.close()
+    assert row[0] is None
+    assert row[1] == str(archived_path)
+    assert row[2] is not None
+
+    rerun = archive_ready_videos(
+        client_id=seeded["client_id"],
+        archive_dir=str(archive_root),
+    )
+    assert rerun["reconciled"] == 0
+
+
 def test_archive_uses_client_visibility_with_shared_transcript(media_db, tmp_path):
     from processing.media_archive import archive_ready_videos
 

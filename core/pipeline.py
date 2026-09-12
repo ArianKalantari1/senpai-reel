@@ -579,14 +579,18 @@ def run_archive_stage(
         _emit(progress_callback, started, stage, done, total, post_id, message)
 
     result = archive_ready_videos(client_id=client_id, progress_callback=_archive_progress)
-    status = "skipped" if result["total"] == 0 else "done"
+    status = "skipped" if result["total"] == 0 and result["reconciled"] == 0 else "done"
     return _stage_result(
         stage,
         status,
         done=result["archived"],
         failed=0,
         total=result["total"],
-        message=f"Archived {result['archived']} source videos; kept {result['skipped']} in place.",
+        message=(
+            f"Archived {result['archived']} source videos; "
+            f"reconciled {result['reconciled']} archive records; "
+            f"kept {result['skipped']} in place."
+        ),
     )
 
 
