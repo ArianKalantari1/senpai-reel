@@ -219,6 +219,104 @@ def _archive_destination(root: Path, client_id: str, src: Path) -> Path:
     raise RuntimeError(f"Could not choose an archive path for {src.name}")
 
 
+def _existing_archive_match(root: Path, client_id: str, src: Path) -> Optional[Path]:
+    """Find where a previously moved source file landed without touching files."""
+
+    dest_dir = root / _safe_segment(client_id)
+    if not dest_dir.exists() or not dest_dir.is_dir():
+        return None
+
+    exact = dest_dir / src.name
+    if exact.exists() and exact.is_file():
+        return exact
+
+    pattern = re.compile(rf"^{re.escape(src.stem)}_(\d+){re.escape(src.suffix)}$")
+    candidates = []
+    for candidate in dest_dir.glob(f"{src.stem}_*{src.suffix}"):
+        if not candidate.is_file():
+            continue
+        match = pattern.match(candidate.name)
+        if match:
+            candidates.append((int(match.group(1)), candidate))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item[0])[0][1]
+
+
+def reconcile_orphaned_archives(
+    client_id: str = DEFAULT_CLIENT_ID,
+    archive_dir: Optional[str] = None,
+    ensure_schema: bool = True,
+) -> dict:
+    """Record archive paths for videos moved before their DB update completed."""
+
+    if ensure_schema:
+        init_db()
+
+    root = configured_archive_dir(archive_dir)
+    if root is None:
+        return {
+            "status": "skipped",
+            "reason": "archive_unset",
+            "reconciled": 0,
+            "unmatched": 0,
+            "total": 0,
+            "results": [],
+        }
+    if not root.exists() or not root.is_dir():
+        return {
+            "status": "skipped",
+            "reason": "archive_unreachable",
+            "reconciled": 0,
+            "unmatched": 0,
+            "total": 0,
+            "results": [],
+        }
+
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT p.post_id, p.local_video_path
+            FROM posts p
+            JOIN client_posts cp ON p.post_id = cp.post_id
+            WHERE cp.client_id = ?
+              AND p.archived_video_path IS NULL
+              AND p.local_video_path IS NOT NULL
+              AND p.local_video_path != ''
+            """,
+            [client_id],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    reconciled = unmatched = 0
+    results = []
+    for post_id, local_video_path in rows:
+        src = Path(local_video_path)
+        if src.exists():
+            continue
+
+        match = _existing_archive_match(root, client_id, src)
+        if match is None:
+            unmatched += 1
+            results.append({"post_id": post_id, "status": "unmatched", "path": None})
+            continue
+
+        run_db_write(_mark_archived, post_id, str(match))
+        reconciled += 1
+        results.append({"post_id": post_id, "status": "reconciled", "path": str(match)})
+
+    return {
+        "status": "done",
+        "reason": None,
+        "reconciled": reconciled,
+        "unmatched": unmatched,
+        "total": reconciled + unmatched,
+        "results": results,
+    }
+
+
 def archive_video_if_ready(
     post_id: str,
     client_id: str = DEFAULT_CLIENT_ID,
@@ -288,6 +386,11 @@ def archive_ready_videos(
     """Archive all currently eligible videos for one client."""
 
     init_db()
+    reconcile_result = reconcile_orphaned_archives(
+        client_id=client_id,
+        archive_dir=archive_dir,
+        ensure_schema=False,
+    )
     conn = get_connection()
     try:
         rows = conn.execute(
@@ -326,4 +429,11 @@ def archive_ready_videos(
         if progress_callback:
             progress_callback(index, total, post_id, result)
 
-    return {"archived": archived, "skipped": skipped, "total": total, "results": results}
+    return {
+        "archived": archived,
+        "skipped": skipped,
+        "total": total,
+        "results": results,
+        "reconciled": reconcile_result["reconciled"],
+        "reconcile": reconcile_result,
+    }
