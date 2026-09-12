@@ -35,12 +35,13 @@ def _page_link(target: str, label: str):
 
 
 accounts = get_client_accounts(client_id)
-configured_count = sum(1 for row in secret_status(st) if row["configured"])
+required_secret_rows = [row for row in secret_status(st) if row["required"]]
+configured_count = sum(1 for row in required_secret_rows if row["configured"])
 
 step1, step2, step3, step4 = st.columns(4)
 step1.metric("1. Client", "Ready" if active_client else "Needed")
 step2.metric("2. Competitors", len(accounts))
-step3.metric("3. API Keys", f"{configured_count}/3")
+step3.metric("3. API Keys", f"{configured_count}/{len(required_secret_rows)}")
 step4.metric("4. Content", "Ready" if accounts else "Waiting")
 
 st.markdown("---")
