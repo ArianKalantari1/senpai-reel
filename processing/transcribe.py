@@ -21,6 +21,7 @@ import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
 from processing.concurrency import run_db_write
+from processing.media_archive import archive_video_if_ready
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +274,7 @@ def transcribe_post(
     audio_path = row[0]
     result = transcribe_audio_file(audio_path, post_id, api_key, provider, client_id)
     run_db_write(save_transcript, result)
+    archive_video_if_ready(post_id, client_id=client_id)
     return result
 
 

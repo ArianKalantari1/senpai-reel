@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
 from processing.concurrency import io_worker_count, run_bounded, run_db_write
+from processing.media_archive import archive_video_if_ready
 from processing.transcribe import save_transcript, transcribe_audio_file
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ def run_transcription_queue(
         post_id, audio_path = row
         result = transcribe_audio_file(audio_path, post_id, api_key, provider, client_id)
         run_db_write(save_transcript, result)
+        archive_video_if_ready(post_id, client_id=client_id)
         return result
 
     def _progress(count, count_total, row, result, error):
