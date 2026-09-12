@@ -45,7 +45,7 @@ class AssemblyAIProvider:
                 raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         config = self._aai.TranscriptionConfig(
-            language_code="en",
+            speech_models=["universal-2"],
             punctuate=True,
             format_text=True,
             word_boost=["ATS", "resume", "LinkedIn", "STAR", "KPI"],  # domain hints

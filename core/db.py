@@ -234,7 +234,7 @@ def init_db():
             pass  # column already exists
 
     # Phase 10 — Migrate embedding column from FLOAT[1536] to FLOAT[512]
-    # DuckDB does not support ALTER COLUMN type, so we drop and re-add.
+    # DuckDB does not support ALTER COLUMN type, so we recreate the table.
     # This clears existing embeddings; they must be re-embedded after migration.
     try:
         col_info = conn.execute(
@@ -242,9 +242,17 @@ def init_db():
             "WHERE table_name = 'message_units' AND column_name = 'embedding'"
         ).fetchone()
         if col_info and "1536" in str(col_info[0]):
-            conn.execute("ALTER TABLE message_units DROP COLUMN embedding")
-            conn.execute("ALTER TABLE message_units ADD COLUMN embedding FLOAT[512]")
-            conn.execute("UPDATE message_units SET embedded_at = NULL")
+            conn.execute("""
+                CREATE TABLE message_units_new AS
+                SELECT unit_id, post_id, text, claim, advice, topic, subtopic,
+                       content_type, confidence, source_start, source_end,
+                       extracted_at, model,
+                       NULL::FLOAT[512] AS embedding,
+                       NULL::TIMESTAMP   AS embedded_at
+                FROM message_units
+            """)
+            conn.execute("DROP TABLE message_units")
+            conn.execute("ALTER TABLE message_units_new RENAME TO message_units")
     except Exception:
         pass  # table may not exist yet or already migrated
 
@@ -253,6 +261,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_posts_account_id    ON posts(account_id)",
         "CREATE INDEX IF NOT EXISTS idx_posts_posted_at     ON posts(posted_at)",
         "CREATE INDEX IF NOT EXISTS idx_posts_download_status ON posts(download_status)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_message_units_unit_id  ON message_units(unit_id)",
         "CREATE INDEX IF NOT EXISTS idx_message_units_topic ON message_units(topic)",
         "CREATE INDEX IF NOT EXISTS idx_message_units_post_id ON message_units(post_id)",
         "CREATE INDEX IF NOT EXISTS idx_transcripts_post_id ON transcripts(post_id)",

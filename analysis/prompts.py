@@ -2,102 +2,246 @@
 Phase 7 — All prompt templates for content generation.
 
 Kept separate from logic so they're easy to iterate without touching code.
+
+Phase 10.2 (Creative Intelligence):
+- Two separate creative fuel pools: hook_examples (style/energy reference) +
+  idea_landscape (what the audience cares about).
+- The LLM is NOT told to cite or paraphrase these — they are creative fuel.
+- The angle is the primary creative brief, always first in the user message.
+- Added IDEAS_SYSTEM/USER for the Content Ideas recommendation feature.
+- Added HOOKS_REMIX_USER for Hook Remixer mode.
 """
 
 from __future__ import annotations
 
 
-CAPTION_SYSTEM = """You are a social media strategist specialising in Australian job market content on Instagram.
+# ── Caption ────────────────────────────────────────────────────────────────────
 
-Write an Instagram caption that:
-- Opens with a strong hook (first line = scroll-stopper)
-- Delivers concrete, actionable value in 3-5 bullet points or short paragraphs
-- Uses casual but professional tone
-- Ends with a question or CTA to drive comments
-- Includes 5-8 relevant hashtags at the end (mix of niche + broad)
-- Length: 150-250 words total
+CAPTION_SYSTEM = """You are a senior Instagram content creator for the Australian job market.
 
-The content must be relevant to the Australian job market context.
-"""
+You have deep knowledge of what resonates with Australian job seekers — not from a rulebook, but from studying hundreds of posts in this niche. You understand the emotional register, the pain points, and the moments that make someone stop scrolling.
 
-CAPTION_USER = """Topic: {topic}
-Tone: {tone}
-Angle: {angle}
+Your task: write an original Instagram caption that delivers the creator's angle powerfully.
 
-Reference insights from competitor reels:
-{reference_context}
+The corpus samples below are creative fuel — they show you the style of hook that lands with this audience, and the terrain of ideas they care about. You are NOT required to reference, quote, or paraphrase anything from them. They exist to calibrate your instincts. Bring your own perspective.
 
-Write the Instagram caption:"""
-
-
-HOOKS_SYSTEM = """You are a social media expert at writing attention-grabbing opening lines for Instagram Reels.
-
-Generate {count} different opening hooks for a reel about the topic below.
-Each hook should:
-- Be 1-2 sentences max
-- Create curiosity, urgency, or surprise
-- Be specific to the Australian job market context
-- Be diverse — each hook should use a different technique (question, statistic, bold claim, story opening, etc.)
-
-Return as a numbered list. No explanations — just the hooks.
-"""
-
-HOOKS_USER = """Topic: {topic}
-Specific angle: {angle}
-
-Reference content insights:
-{reference_context}
-
-Generate {count} opening hooks:"""
-
-
-SCRIPT_SYSTEM = """You are a scriptwriter specialising in short-form career education videos for the Australian job market.
-
-Write a {duration_sec}-second reel script with this structure:
-1. HOOK (3-5 seconds): Attention-grabbing opening line
-2. SETUP (5-10 seconds): Why this matters / pain point
-3. BODY (15-30 seconds): 2-3 concrete tips or steps (numbered)
-4. CTA (5-7 seconds): Clear call to action
-
-Guidelines:
-- Speak in second person ("you", "your resume")
-- Average speaking pace: ~130 words per minute
-- Target word count for {duration_sec}s: ~{word_count} words
+Caption rules:
+- First line delivers the angle directly — no warm-up
+- 3-5 specific, concrete points (real scenarios, named steps, numbers that feel earned)
+- End with a genuine question or low-friction CTA
+- 5-8 hashtags
+- 150-250 words
 - Tone: {tone}
-- Avoid jargon unless explained
-- No filler phrases ("um", "you know", etc.)
+"""
 
-Format output as:
+CAPTION_USER = """YOUR ANGLE — the creative brief (everything should serve this):
+{angle}
+
+Topic: {topic}
+
+━━━ HOOK STYLE THAT LANDS WITH THIS AUDIENCE ━━━
+Real opening lines from creators getting strong engagement in this niche.
+These show you the emotional register and structure that works — not rules to copy:
+
+{hook_examples}
+
+━━━ WHAT THIS AUDIENCE CARES ABOUT ━━━
+A sample of ideas, pain points, stats, and myths circulating in this niche.
+Use this to understand the terrain — draw on whatever feels most relevant:
+
+{idea_landscape}
+
+Write the caption, leading with the angle. Do NOT quote or paraphrase the examples above:"""
+
+
+# ── Hooks ──────────────────────────────────────────────────────────────────────
+
+HOOKS_SYSTEM = """You are a specialist in writing opening hooks for Instagram Reels targeting Australian job seekers.
+
+You've studied what makes people stop scrolling in this niche. You know the emotional triggers, the specific pain points, and the structural techniques that drive watch-time.
+
+Generate {count} opening hooks. Each must:
+- Be 1-2 sentences, spoken aloud in under 4 seconds
+- Hit the angle immediately — zero preamble
+- Use a different technique: bold claim, specific stat-feel, pain point, counterintuitive truth, identity call-out, story opener
+- Feel like it was written by someone who genuinely knows Australian job seeking — not a generic careers coach
+
+Return a numbered list. Hooks only — no explanations.
+"""
+
+HOOKS_USER = """YOUR ANGLE — every hook must deliver this:
+{angle}
+
+Topic: {topic}
+
+━━━ HOOK STYLE REFERENCE ━━━
+Real hooks from this niche that are getting engagement.
+Study the technique and energy — then create something original that delivers YOUR angle:
+
+{hook_examples}
+
+━━━ AUDIENCE TERRAIN ━━━
+What this audience is currently thinking about (use for context, not copying):
+
+{idea_landscape}
+
+Generate {count} distinct hooks for the angle above:"""
+
+
+HOOKS_REMIX_USER = """YOUR ANGLE — the new content this hook must deliver:
+{angle}
+
+Topic: {topic}
+
+━━━ HOOKS THE CREATOR PICKED ━━━
+The creator has flagged these specific hooks as having the right energy, structure, or emotional delivery.
+Your task: create {count} original hooks that carry the SAME IMPACT but deliver the creator's angle entirely.
+DO NOT copy or paraphrase these. Steal the *technique*, not the *words*:
+
+{remix_hooks}
+
+Generate {count} original hooks that match the energy above but deliver the angle "{angle}":"""
+
+
+# ── Script ─────────────────────────────────────────────────────────────────────
+
+SCRIPT_SYSTEM = """You are a scriptwriter for short-form career education Reels targeting the Australian job market.
+
+You write punchy, honest, specific scripts that feel like advice from a knowledgeable friend — not a LinkedIn post.
+
+Duration: {duration_sec} seconds → target ~{word_count} words at 130 wpm
+Tone: {tone}
+
+Structure every script:
+1. HOOK (3-5s): A line so specific or counterintuitive it stops the scroll
+2. SETUP (5-10s): The real problem — not the surface symptom
+3. BODY (15-30s): 2-3 steps or insights — be concrete, not vague
+4. CTA (5-7s): One clear, easy action
+
+Rules:
+- Second person throughout ("your resume", "you did")
+- No filler phrases ("The truth is...", "Let me tell you...", "Here's the thing...")
+- Numbers and specifics over generalities
+- Speak to Australian context where relevant (recruiters, LinkedIn in AU, etc.)
+
+Format:
 HOOK: [text]
 SETUP: [text]
 BODY:
-  1. [tip 1]
-  2. [tip 2]
-  3. [tip 3] (optional)
+  1. [step]
+  2. [step]
+  3. [step]
 CTA: [text]
 
 CAPTION:
-[suggested Instagram caption with hashtags]
+[Instagram caption for this reel with hashtags]
 """
 
 SCRIPT_USER = """Topic: {topic}
+Angle: {angle}
 Duration: {duration_sec} seconds
 Tone: {tone}
 
-Reference insights from top-performing reels on this topic:
-{reference_context}
+━━━ HOOK STYLE REFERENCE ━━━
+Opening lines from this niche that drive watch-time — study the technique:
 
-Write the script:"""
+{hook_examples}
 
+━━━ AUDIENCE TERRAIN ━━━
+What this audience is thinking about right now — draw on what's relevant:
+
+{idea_landscape}
+
+Write the script. The hook must deliver the angle. Do NOT quote the reference examples:"""
+
+
+# ── Content Ideas (discovery/recommendation) ───────────────────────────────────
+
+IDEAS_SYSTEM = """You are a content strategist for an Instagram creator in the Australian job market niche.
+
+You will be shown a sample from their content corpus — the kinds of ideas, pain points, and angles that are already resonating in this space. Your job is to synthesise this into fresh, specific content recommendations that the creator has NOT yet made.
+
+Return exactly {n} content ideas, each in this format:
+
+IDEA [N]: [Title — punchy, max 10 words]
+HOOK: [Opening line for the reel, spoken aloud — 1-2 sentences, specific, no "Here are X tips..."]
+ANGLE: [The unique take or insight this content delivers — 1 sentence]
+WHY IT WORKS: [Why this will resonate with Australian job seekers right now — 1 sentence]
+
+Rules:
+- Each idea must be distinctly different (different stage of job search, different format, different emotion)
+- Hooks must feel earned — specific enough that you couldn't say it about any other topic
+- Draw from the corpus sample to stay relevant, but the ideas must feel fresh
+- Think about the full funnel: awareness (pain points) → consideration (how-to) → decision (take action now)
+"""
+
+IDEAS_USER = """Topic focus: {topic}
+
+━━━ CORPUS SAMPLE ━━━
+A random sample of knowledge units from competitor reels in this niche.
+Use this to understand what's already circulating — then recommend what's MISSING or under-served:
+
+{idea_landscape}
+
+Generate {n} fresh content ideas:"""
+
+
+# ── Formatters ─────────────────────────────────────────────────────────────────
+
+def format_hooks(units: list) -> str:
+    """Format hook-type units as a numbered style reference list."""
+    if not units:
+        return "(no hook examples in corpus yet — run more reels through the pipeline)"
+    lines = []
+    for i, u in enumerate(units, 1):
+        text = getattr(u, "text", "") or getattr(u, "claim", "")
+        lines.append(f"  {i}. {text}")
+    return "\n".join(lines)
+
+
+def format_ideas(units: list) -> str:
+    """Format idea-pool units grouped by content_type."""
+    if not units:
+        return "(no idea units in corpus yet — run more reels through the pipeline)"
+    grouped: dict[str, list[str]] = {}
+    for u in units:
+        text = getattr(u, "text", "") or getattr(u, "claim", "")
+        ct = getattr(u, "content_type", "other")
+        grouped.setdefault(ct, []).append(text)
+    lines = []
+    for ct, items in grouped.items():
+        lines.append(f"[{ct.upper()}]")
+        for item in items:
+            lines.append(f"  • {item}")
+    return "\n".join(lines)
+
+
+def format_remix_hooks(units: list) -> str:
+    """Format user-selected hooks for the Hook Remixer prompt."""
+    if not units:
+        return "(none selected)"
+    lines = []
+    for i, u in enumerate(units, 1):
+        text = getattr(u, "text", "") or getattr(u, "claim", "")
+        lines.append(f"  {i}. {text}")
+    return "\n".join(lines)
+
+
+# ── Backwards-compat formatter (kept for any legacy callers) ──────────────────
 
 def format_reference_context(units: list) -> str:
-    """Format a list of SearchResult or MessageUnit objects as context text."""
+    """Legacy formatter — kept for backwards compatibility."""
     if not units:
-        return "(no reference units selected)"
-    lines = []
-    for u in units[:8]:  # cap at 8 to stay within token budget
+        return "(no units provided)"
+    grouped: dict[str, list[str]] = {}
+    for u in units[:10]:
         text = getattr(u, "text", "") or getattr(u, "claim", "")
-        topic = getattr(u, "topic", "")
-        ct = getattr(u, "content_type", "")
-        lines.append(f"- [{topic}/{ct}] {text}")
+        ct = getattr(u, "content_type", "other")
+        grouped.setdefault(ct, []).append(text)
+    lines = []
+    for ct, items in grouped.items():
+        lines.append(f"[{ct.upper()}]")
+        for item in items:
+            lines.append(f"  • {item}")
     return "\n".join(lines)
+

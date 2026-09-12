@@ -163,3 +163,99 @@ def keyword_search(
         ]
     finally:
         conn.close()
+
+
+def get_hook_examples(topic: str = "All", limit: int = 8) -> List[SearchResult]:
+    """
+    Pull real hook lines from the corpus ordered by confidence.
+    Falls back to all topics when fewer than 3 match the requested topic —
+    so there's always something to show the LLM as creative reference.
+    """
+    conn = get_connection()
+    try:
+        def _fetch(apply_topic: bool) -> list:
+            where = "WHERE mu.content_type = 'hook'"
+            params: list = []
+            if apply_topic and topic != "All":
+                where += " AND mu.topic = ?"
+                params.append(topic)
+            params.append(limit)
+            return conn.execute(
+                f"""
+                SELECT mu.unit_id, mu.post_id,
+                       COALESCE(ca.username, 'unknown') AS username,
+                       mu.topic, mu.content_type, mu.text, mu.claim,
+                       mu.confidence AS score, p.video_url,
+                       CAST(p.posted_at AS TEXT) AS posted_at
+                FROM message_units mu
+                LEFT JOIN posts p ON mu.post_id = p.post_id
+                LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
+                {where}
+                ORDER BY mu.confidence DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        rows = _fetch(apply_topic=True)
+        if len(rows) < 3 and topic != "All":
+            rows = _fetch(apply_topic=False)
+
+        return [
+            SearchResult(
+                unit_id=r[0], post_id=r[1], username=r[2],
+                topic=r[3], content_type=r[4], text=r[5], claim=r[6],
+                score=float(r[7]) if r[7] else 0.0, video_url=r[8], posted_at=r[9],
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_topic_ideas(topic: str = "All", limit: int = 12) -> List[SearchResult]:
+    """
+    Pull a random sample of tips, stats, warnings, and myths for the topic.
+    These represent the intellectual landscape — what the audience cares about.
+    Falls back to all topics when fewer than 3 match.
+    """
+    conn = get_connection()
+    try:
+        def _fetch(apply_topic: bool) -> list:
+            where = "WHERE mu.content_type IN ('tip', 'stat', 'warning', 'myth')"
+            params: list = []
+            if apply_topic and topic != "All":
+                where += " AND mu.topic = ?"
+                params.append(topic)
+            params.append(limit)
+            return conn.execute(
+                f"""
+                SELECT mu.unit_id, mu.post_id,
+                       COALESCE(ca.username, 'unknown') AS username,
+                       mu.topic, mu.content_type, mu.text, mu.claim,
+                       mu.confidence AS score, p.video_url,
+                       CAST(p.posted_at AS TEXT) AS posted_at
+                FROM message_units mu
+                LEFT JOIN posts p ON mu.post_id = p.post_id
+                LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
+                {where}
+                ORDER BY RANDOM()
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+        rows = _fetch(apply_topic=True)
+        if len(rows) < 3 and topic != "All":
+            rows = _fetch(apply_topic=False)
+
+        return [
+            SearchResult(
+                unit_id=r[0], post_id=r[1], username=r[2],
+                topic=r[3], content_type=r[4], text=r[5], claim=r[6],
+                score=float(r[7]) if r[7] else 0.0, video_url=r[8], posted_at=r[9],
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()

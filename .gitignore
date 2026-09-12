@@ -33,6 +33,7 @@ downloads/
 audio_extracts/
 data/raw/
 data/processed/
+data/exports/
 
 # macOS
 .DS_Store

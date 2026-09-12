@@ -174,21 +174,30 @@ def save_message_units(units: List[MessageUnit]):
         return
     conn = get_connection()
     try:
-        conn.executemany(
-            """
-            INSERT INTO message_units (
-                unit_id, post_id, text, claim, advice, topic, subtopic,
-                content_type, confidence, extracted_at, model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (unit_id) DO NOTHING
-            """,
-            [
-                (
-                    u.unit_id, u.post_id, u.text, u.claim, u.advice, u.topic, u.subtopic,
-                    u.content_type, u.confidence, u.extracted_at, u.model,
-                )
-                for u in units
-            ],
-        )
+        # Filter out unit_ids that already exist to avoid constraint errors.
+        # (DuckDB ON CONFLICT requires a PRIMARY KEY; after table recreation only
+        # a UNIQUE index exists, which older DuckDB builds don't honour in upserts.)
+        existing = {
+            r[0]
+            for r in conn.execute("SELECT unit_id FROM message_units").fetchall()
+        }
+        rows = [
+            (
+                u.unit_id, u.post_id, u.text, u.claim, u.advice, u.topic, u.subtopic,
+                u.content_type, u.confidence, u.extracted_at, u.model,
+            )
+            for u in units
+            if u.unit_id not in existing
+        ]
+        if rows:
+            conn.executemany(
+                """
+                INSERT INTO message_units (
+                    unit_id, post_id, text, claim, advice, topic, subtopic,
+                    content_type, confidence, extracted_at, model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
     finally:
         conn.close()

@@ -62,12 +62,17 @@ def run_transcription_queue(
     rows = conn.execute(
         """
         SELECT p.post_id,
-               COALESCE(NULLIF(p.local_audio_path, ''), p.audio_url) AS audio_source
+               COALESCE(
+                   NULLIF(p.local_audio_path, ''),
+                   NULLIF(p.audio_url, ''),
+                   p.video_url
+               ) AS audio_source
         FROM posts p
         LEFT JOIN transcripts t ON p.post_id = t.post_id
         WHERE (
               (p.local_audio_path IS NOT NULL AND p.local_audio_path != '')
            OR (p.audio_url       IS NOT NULL AND p.audio_url       != '')
+           OR (p.video_url       IS NOT NULL AND p.video_url       != '')
         )
           AND t.post_id IS NULL
         LIMIT ?

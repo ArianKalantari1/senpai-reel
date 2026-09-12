@@ -16,10 +16,12 @@ from typing import List, Optional
 from core.db import get_connection
 from analysis.prompts import (
     CAPTION_SYSTEM, CAPTION_USER,
-    HOOKS_SYSTEM, HOOKS_USER,
+    HOOKS_SYSTEM, HOOKS_USER, HOOKS_REMIX_USER,
     SCRIPT_SYSTEM, SCRIPT_USER,
-    format_reference_context,
+    IDEAS_SYSTEM, IDEAS_USER,
+    format_hooks, format_ideas, format_remix_hooks,
 )
+from analysis.search import get_hook_examples, get_topic_ideas
 
 _MODEL = "llama-3.3-70b-versatile"   # Groq model name
 
@@ -59,12 +61,22 @@ def generate_caption(
     topic: str,
     angle: str,
     tone: str,
-    reference_units: list,
-    openai_api_key: str,
+    openai_api_key: str = "",
 ) -> GeneratedContent:
-    context = format_reference_context(reference_units)
-    user_msg = CAPTION_USER.format(topic=topic, tone=tone, angle=angle, reference_context=context)
-    text, tokens, cost = _call_gpt(CAPTION_SYSTEM, user_msg, openai_api_key, max_tokens=600)
+    """
+    Generate a caption. Auto-fetches hook examples + idea landscape from corpus.
+    No manual unit selection required.
+    """
+    hooks = get_hook_examples(topic)
+    ideas = get_topic_ideas(topic)
+    system = CAPTION_SYSTEM.format(tone=tone)
+    user_msg = CAPTION_USER.format(
+        angle=angle or topic,
+        topic=topic,
+        hook_examples=format_hooks(hooks),
+        idea_landscape=format_ideas(ideas),
+    )
+    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=600)
 
     result = GeneratedContent(
         gen_id=str(uuid.uuid4()),
@@ -76,21 +88,47 @@ def generate_caption(
         cost_usd=cost,
         created_at=datetime.utcnow(),
     )
-    _save(result, reference_units)
+    _save(result, hooks + ideas)
     return result
 
 
 def generate_hooks(
     topic: str,
     angle: str,
-    reference_units: list,
-    openai_api_key: str,
     count: int = 5,
+    remix_examples: Optional[list] = None,
+    openai_api_key: str = "",
 ) -> GeneratedContent:
+    """
+    Generate opening hooks.
+    - Normal mode: auto-fetches hook examples + ideas from corpus.
+    - Remix mode: remix_examples is a list of user-selected corpus hooks to draw
+      structural inspiration from while delivering the angle.
+    """
     system = HOOKS_SYSTEM.format(count=count)
-    context = format_reference_context(reference_units)
-    user_msg = HOOKS_USER.format(topic=topic, angle=angle, reference_context=context, count=count)
-    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=400)
+
+    if remix_examples:
+        # Remix mode — the user picked specific hooks they like the structure of
+        user_msg = HOOKS_REMIX_USER.format(
+            angle=angle or topic,
+            topic=topic,
+            count=count,
+            remix_hooks=format_remix_hooks(remix_examples),
+        )
+        source_units = remix_examples
+    else:
+        hooks = get_hook_examples(topic)
+        ideas = get_topic_ideas(topic)
+        user_msg = HOOKS_USER.format(
+            angle=angle or topic,
+            topic=topic,
+            hook_examples=format_hooks(hooks),
+            idea_landscape=format_ideas(ideas),
+            count=count,
+        )
+        source_units = hooks + ideas
+
+    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=500)
 
     result = GeneratedContent(
         gen_id=str(uuid.uuid4()),
@@ -102,7 +140,7 @@ def generate_hooks(
         cost_usd=cost,
         created_at=datetime.utcnow(),
     )
-    _save(result, reference_units)
+    _save(result, source_units)
     return result
 
 
@@ -110,16 +148,25 @@ def generate_script(
     topic: str,
     duration_sec: int,
     tone: str,
-    reference_units: list,
-    openai_api_key: str,
+    angle: str = "",
+    openai_api_key: str = "",
 ) -> GeneratedContent:
+    """
+    Generate a reel script. Auto-fetches hook examples + ideas from corpus.
+    """
     word_count = int(duration_sec / 60 * 130)
+    hooks = get_hook_examples(topic)
+    ideas = get_topic_ideas(topic)
     system = SCRIPT_SYSTEM.format(duration_sec=duration_sec, word_count=word_count, tone=tone)
-    context = format_reference_context(reference_units)
     user_msg = SCRIPT_USER.format(
-        topic=topic, duration_sec=duration_sec, tone=tone, reference_context=context
+        topic=topic,
+        angle=angle or topic,
+        duration_sec=duration_sec,
+        tone=tone,
+        hook_examples=format_hooks(hooks),
+        idea_landscape=format_ideas(ideas),
     )
-    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=800)
+    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=900)
 
     result = GeneratedContent(
         gen_id=str(uuid.uuid4()),
@@ -131,7 +178,39 @@ def generate_script(
         cost_usd=cost,
         created_at=datetime.utcnow(),
     )
-    _save(result, reference_units)
+    _save(result, hooks + ideas)
+    return result
+
+
+def generate_ideas(
+    topic: str,
+    n: int = 5,
+    openai_api_key: str = "",
+) -> GeneratedContent:
+    """
+    Recommend fresh content ideas based on what's circulating in the corpus.
+    No angle needed — the LLM proposes the angles.
+    """
+    ideas = get_topic_ideas(topic, limit=20)
+    system = IDEAS_SYSTEM.format(n=n)
+    user_msg = IDEAS_USER.format(
+        topic=topic,
+        idea_landscape=format_ideas(ideas),
+        n=n,
+    )
+    text, tokens, cost = _call_gpt(system, user_msg, openai_api_key, max_tokens=900)
+
+    result = GeneratedContent(
+        gen_id=str(uuid.uuid4()),
+        content_type="ideas",
+        topic=topic,
+        output_text=text,
+        model=_MODEL,
+        tokens_used=tokens,
+        cost_usd=cost,
+        created_at=datetime.utcnow(),
+    )
+    _save(result, ideas)
     return result
 
 

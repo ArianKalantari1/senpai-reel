@@ -11,11 +11,39 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 import uuid
 from datetime import datetime
 from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _with_backoff(fn, max_retries: int = 5, base_delay: float = 15.0):
+    """Call fn(), retrying on 429 / queue_exceeded with exponential backoff."""
+    delay = base_delay
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except Exception as exc:
+            msg = str(exc)
+            is_rate = (
+                "429" in msg
+                or "too_many_requests" in msg.lower()
+                or "queue_exceeded" in msg.lower()
+                or "rate_limit" in msg.lower()
+                or "high traffic" in msg.lower()
+            )
+            if is_rate and attempt < max_retries - 1:
+                wait = delay * (2 ** attempt)
+                logger.warning(
+                    "Rate limit hit (attempt %d/%d) — waiting %.0fs: %s",
+                    attempt + 1, max_retries, wait, msg[:120],
+                )
+                time.sleep(wait)
+            else:
+                raise
 
 # Cerebras pricing (after free tier)
 _CEREBRAS_INPUT_COST  = 0.85 / 1_000_000   # $0.85/1M input tokens
@@ -28,7 +56,7 @@ _GROQ_OUTPUT_COST = 0.79 / 1_000_000
 
 class CerebrasProvider:
     """
-    LLM extraction via Cerebras LLaMA 3.3 70B.
+    LLM extraction via Cerebras Qwen-3 235B.
 
     Speed:     ~2,100 tokens/sec (wafer-scale hardware)
     Free tier: 1,000 req/day, 30 req/min
@@ -37,7 +65,7 @@ class CerebrasProvider:
     Install: pip install cerebras-cloud-sdk
     """
 
-    def __init__(self, api_key: str, model: str = "llama-3.3-70b"):
+    def __init__(self, api_key: str, model: str = "qwen-3-235b-a22b-instruct-2507"):
         if not api_key:
             raise ValueError("CEREBRAS_API_KEY is required")
         from cerebras.cloud.sdk import Cerebras
@@ -68,15 +96,19 @@ class CerebrasProvider:
         if ocr_text:
             user_content += f"\n\nOn-screen text (from video frames):\n{ocr_text[:800]}"
 
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user",   "content": user_content},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=2000,
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user",   "content": user_content},
+        ]
+
+        response = _with_backoff(
+            lambda: self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=2000,
+            )
         )
 
         usage = response.usage
@@ -86,10 +118,26 @@ class CerebrasProvider:
         )
 
         raw_content = response.choices[0].message.content
+
+        # Qwen3 / reasoning models prepend <think>…</think> blocks before the JSON.
+        # Strip them before parsing so json.loads doesn't fail.
+        clean = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+        if not clean:
+            clean = raw_content  # nothing was stripped — use original
+
+        parsed = None
         try:
-            parsed = json.loads(raw_content)
+            parsed = json.loads(clean)
         except json.JSONDecodeError:
-            logger.warning("Cerebras returned non-JSON for %s", post_id)
+            # Last resort: find the outermost JSON object in the text
+            m = re.search(r'\{.*\}', clean, re.DOTALL)
+            if m:
+                try:
+                    parsed = json.loads(m.group())
+                except json.JSONDecodeError:
+                    pass
+        if parsed is None:
+            logger.warning("Cerebras returned non-JSON for %s — raw: %.200s", post_id, raw_content)
             return [], round(cost, 6)
 
         raw_units = parsed.get("units", [])
@@ -128,14 +176,16 @@ class CerebrasProvider:
         Returns:
             (output_text, tokens_used, cost_usd)
         """
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.7,
-            max_tokens=max_tokens,
+        response = _with_backoff(
+            lambda: self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=max_tokens,
+            )
         )
         usage = response.usage
         tokens = (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
@@ -186,15 +236,19 @@ class GroqLLMProvider:
         if ocr_text:
             user_content += f"\n\nOn-screen text (from video frames):\n{ocr_text[:800]}"
 
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user",   "content": user_content},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=2000,
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user",   "content": user_content},
+        ]
+
+        response = _with_backoff(
+            lambda: self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.2,
+                max_tokens=2000,
+            )
         )
 
         usage = response.usage
@@ -245,14 +299,16 @@ class GroqLLMProvider:
         Returns:
             (output_text, tokens_used, cost_usd)
         """
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_prompt},
-            ],
-            temperature=0.7,
-            max_tokens=max_tokens,
+        response = _with_backoff(
+            lambda: self._client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=max_tokens,
+            )
         )
         usage = response.usage
         tokens = (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)

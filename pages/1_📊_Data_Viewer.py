@@ -221,3 +221,163 @@ with dl2:
         width="stretch",
     )
 
+# ── Full Report Export ─────────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("📊 Full Report Export")
+st.caption(
+    "Complete dataset — all accounts, all rows, joins metadata + transcripts + extracted knowledge units. "
+    "Designed for sharing with clients as a competitor content analysis report."
+)
+
+exp_account = st.selectbox(
+    "Filter by account (or All)",
+    available_accounts,
+    key="export_account",
+)
+
+col_exp1, col_exp2 = st.columns(2)
+
+with col_exp1:
+    st.markdown("**📄 Posts + Transcripts report**")
+    st.caption(
+        "One row per reel. Includes: creator profile, engagement metrics, "
+        "caption, hashtags, full transcript, transcript stats, and a summary of "
+        "extracted knowledge units (count, topics, content types)."
+    )
+    if st.button("⚙️ Build Posts Report", key="btn_build_posts"):
+        with st.spinner("Querying database…"):
+            try:
+                account_where = "" if exp_account == "All" else f"WHERE p.account_id = '{exp_account}'"
+                posts_df = conn.execute(f"""
+                    SELECT
+                        p.post_id,
+                        COALESCE(ca.username, p.account_id)        AS username,
+                        ca.full_name,
+                        ca.followers,
+                        ca.following,
+                        ca.post_count                              AS creator_total_posts,
+                        ca.is_verified,
+                        ca.category                               AS creator_category,
+                        ca.bio,
+                        p.likes,
+                        p.views,
+                        p.comments_count,
+                        ROUND(p.engagement_rate, 4)               AS engagement_rate_pct,
+                        ROUND(p.duration_sec, 1)                  AS duration_sec,
+                        CAST(p.posted_at AS TEXT)                 AS posted_at,
+                        CAST(p.scraped_at AS TEXT)                AS scraped_at,
+                        p.caption_clean                           AS caption,
+                        array_to_string(p.hashtags,  ', ')        AS hashtags,
+                        array_to_string(p.mentions,  ', ')        AS mentions,
+                        p.is_pinned,
+                        p.is_sponsored,
+                        p.video_url,
+                        p.download_status,
+                        t.transcript,
+                        t.language                               AS transcript_language,
+                        t.word_count                             AS transcript_word_count,
+                        ROUND(t.confidence, 3)                   AS transcript_confidence,
+                        t.provider                               AS transcript_provider,
+                        CAST(t.transcribed_at AS TEXT)           AS transcribed_at,
+                        COUNT(mu.unit_id)                        AS knowledge_units_extracted,
+                        string_agg(DISTINCT mu.topic,        ', ' ORDER BY mu.topic)
+                                                                 AS topics_covered,
+                        string_agg(DISTINCT mu.content_type, ', ' ORDER BY mu.content_type)
+                                                                 AS content_types_found,
+                        string_agg(DISTINCT mu.subtopic,     ' | ' ORDER BY mu.subtopic)
+                                                                 AS subtopics
+                    FROM posts p
+                    LEFT JOIN creator_accounts ca  ON p.account_id = ca.account_id
+                    LEFT JOIN transcripts t         ON p.post_id    = t.post_id
+                    LEFT JOIN message_units mu      ON p.post_id    = mu.post_id
+                    {account_where}
+                    GROUP BY
+                        p.post_id, p.account_id, ca.username, ca.full_name, ca.followers, ca.following,
+                        ca.post_count, ca.is_verified, ca.category, ca.bio,
+                        p.likes, p.views, p.comments_count, p.engagement_rate,
+                        p.duration_sec, p.posted_at, p.scraped_at,
+                        p.caption_clean, p.hashtags, p.mentions,
+                        p.is_pinned, p.is_sponsored, p.video_url, p.download_status,
+                        t.transcript, t.language, t.word_count, t.confidence,
+                        t.provider, t.transcribed_at
+                    ORDER BY p.posted_at DESC NULLS LAST
+                """).df()
+                st.session_state["export_posts_df"] = posts_df
+                st.success(f"✅ {len(posts_df):,} rows · {len(posts_df.columns)} columns")
+            except Exception as e:
+                st.error(f"Query failed: {e}")
+
+    if "export_posts_df" in st.session_state:
+        df_p = st.session_state["export_posts_df"]
+        fname = f"competitor_analysis_posts_{exp_account}_{datetime.now().strftime('%Y%m%d')}.csv"
+        st.download_button(
+            "📥 Download Posts Report CSV",
+            data=df_p.to_csv(index=False),
+            file_name=fname,
+            mime="text/csv",
+            key="dl_posts_report",
+        )
+        with st.expander("Preview first 5 rows"):
+            st.dataframe(df_p.head(5), use_container_width=True, hide_index=True)
+
+with col_exp2:
+    st.markdown("**🧠 Knowledge Units report**")
+    st.caption(
+        "One row per extracted insight. Each reel may have multiple rows — one per "
+        "tip, stat, warning, myth, or hook pulled from the transcript. "
+        "Includes the source reel's metrics so you can rank insights by reach."
+    )
+    if st.button("⚙️ Build Knowledge Units Report", key="btn_build_units"):
+        with st.spinner("Querying database…"):
+            try:
+                account_where_mu = "" if exp_account == "All" else f"WHERE p.account_id = '{exp_account}'"
+                units_df = conn.execute(f"""
+                    SELECT
+                        mu.unit_id,
+                        mu.post_id,
+                        COALESCE(ca.username, p.account_id)    AS username,
+                        ca.full_name,
+                        ca.followers,
+                        ca.is_verified,
+                        ca.category                           AS creator_category,
+                        p.likes,
+                        p.views,
+                        ROUND(p.engagement_rate, 4)           AS engagement_rate_pct,
+                        CAST(p.posted_at AS TEXT)             AS posted_at,
+                        mu.topic,
+                        mu.subtopic,
+                        mu.content_type,
+                        mu.text                               AS insight_text,
+                        mu.claim,
+                        mu.advice,
+                        ROUND(mu.confidence, 3)               AS extraction_confidence,
+                        CAST(mu.extracted_at AS TEXT)         AS extracted_at,
+                        array_to_string(p.hashtags, ', ')     AS reel_hashtags,
+                        LEFT(p.caption_clean, 200)            AS reel_caption_preview,
+                        LEFT(t.transcript, 500)               AS transcript_preview
+                    FROM message_units mu
+                    LEFT JOIN posts p         ON mu.post_id    = p.post_id
+                    LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
+                    LEFT JOIN transcripts t    ON mu.post_id   = t.post_id
+                    {account_where_mu}
+                    ORDER BY p.posted_at DESC NULLS LAST, mu.content_type, mu.topic
+                """).df()
+                st.session_state["export_units_df"] = units_df
+                st.success(f"✅ {len(units_df):,} rows · {len(units_df.columns)} columns")
+            except Exception as e:
+                st.error(f"Query failed: {e}")
+
+    if "export_units_df" in st.session_state:
+        df_u = st.session_state["export_units_df"]
+        fname_u = f"competitor_analysis_knowledge_units_{exp_account}_{datetime.now().strftime('%Y%m%d')}.csv"
+        st.download_button(
+            "📥 Download Knowledge Units CSV",
+            data=df_u.to_csv(index=False),
+            file_name=fname_u,
+            mime="text/csv",
+            key="dl_units_report",
+        )
+        with st.expander("Preview first 5 rows"):
+            st.dataframe(df_u.head(5), use_container_width=True, hide_index=True)
+
+

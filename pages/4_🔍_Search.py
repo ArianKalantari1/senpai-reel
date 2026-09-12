@@ -52,21 +52,21 @@ with col_k:
 
 search_mode = "keyword"
 try:
-    openai_key = st.secrets.get("OPENAI_API_KEY", "")
-    if openai_key and embedded_units > 0:
+    voyage_key = st.secrets.get("VOYAGE_API_KEY", "")
+    if voyage_key and embedded_units > 0:
         search_mode = "semantic"
 except Exception:
-    openai_key = ""
+    voyage_key = ""
 
 if search_mode == "keyword":
-    st.caption("⚡ Keyword search mode (set OPENAI_API_KEY + run embedding pipeline for semantic search)")
+    st.caption("⚡ Keyword search mode (set VOYAGE_API_KEY + run the full pipeline to enable semantic search)")
 else:
-    st.caption("🧠 Semantic search mode (cosine similarity on embeddings)")
+    st.caption("🧠 Semantic search mode (cosine similarity on Voyage embeddings)")
 
 if query.strip():
     with st.spinner("Searching…"):
         if search_mode == "semantic":
-            results = semantic_search(query, openai_key, topic_filter, ct_filter, top_k)
+            results = semantic_search(query, "", topic_filter, ct_filter, top_k)
         else:
             results = keyword_search(query, topic_filter, top_k)
 
@@ -79,15 +79,15 @@ if query.strip():
         with st.sidebar:
             st.header("⚙️ Embedding Pipeline")
             st.write(f"{embedded_units}/{total_units} units embedded")
-            if openai_key and embedded_units < total_units:
+            if voyage_key and embedded_units < total_units:
                 if st.button("▶️ Embed pending units"):
                     from analysis.embeddings import embed_pending_units
                     with st.spinner("Embedding…"):
-                        r = embed_pending_units(openai_key, batch_size=50)
+                        r = embed_pending_units(batch_size=50)
                     st.success(f"Done — {r['done']} embedded, {r['failed']} failed")
                     st.rerun()
-            elif not openai_key:
-                st.warning("Set `OPENAI_API_KEY` in secrets.toml to enable embedding.")
+            elif not voyage_key:
+                st.warning("Set `VOYAGE_API_KEY` in secrets.toml to enable semantic search.")
 
         # ── Results cards ──────────────────────────────────────────────────────
         for i, r in enumerate(results):
@@ -115,50 +115,14 @@ else:
         st.header("⚙️ Embedding Pipeline")
         st.write(f"{embedded_units}/{total_units} units embedded")
 
-        try:
-            openai_key = st.secrets.get("OPENAI_API_KEY", "")
-        except Exception:
-            openai_key = ""
-
-        if openai_key and embedded_units < total_units:
+        if voyage_key and embedded_units < total_units:
             if st.button("▶️ Embed pending units"):
                 from analysis.embeddings import embed_pending_units
                 with st.spinner("Embedding…"):
-                    r = embed_pending_units(openai_key, batch_size=50)
+                    r = embed_pending_units(batch_size=50)
                 st.success(f"Done — {r['done']} embedded, {r['failed']} failed")
                 st.rerun()
-        elif not openai_key:
-            st.warning("Set `OPENAI_API_KEY` in secrets.toml to enable semantic search.")
+        elif not voyage_key:
+            st.warning("Set `VOYAGE_API_KEY` in secrets.toml to enable semantic search.")
 
-# ── Extraction queue trigger (bottom) ─────────────────────────────────────────
-with st.expander("⚙️ Run Extraction Queue (Phase 4)"):
-    try:
-        openai_key2 = st.secrets.get("OPENAI_API_KEY", "")
-    except Exception:
-        openai_key2 = ""
 
-    batch = st.number_input("Batch size", 1, 50, 10, key="ext_batch")
-    if not openai_key2:
-        st.warning("OPENAI_API_KEY not set.")
-    elif st.button("▶️ Extract knowledge units from transcripts", type="primary"):
-        from processing.extraction_queue import run_extraction_queue
-
-        prog = st.progress(0)
-        status = st.empty()
-
-        def _cb(done, total, post_id, err, n_units):
-            prog.progress(done / total)
-            if err:
-                status.warning(f"⚠️ {post_id}: {err}")
-            else:
-                status.info(f"✅ {done}/{total} — {n_units} units from `{post_id}`")
-
-        result = run_extraction_queue(openai_key2, batch, _cb)
-        status.empty()
-        prog.empty()
-        st.success(
-            f"Done — {result['done']} posts processed, "
-            f"{result['total_units_extracted']} units extracted, "
-            f"${result['total_cost_usd']:.4f} cost"
-        )
-        st.rerun()

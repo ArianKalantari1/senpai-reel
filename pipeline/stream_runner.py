@@ -184,7 +184,7 @@ def run_stream_pipeline(
                 stats.extract_done += 1
                 stats.total_cost_usd = round(stats.total_cost_usd + cost, 6)
 
-            if units:
+            if units and embed_provider is not None:
                 ef = executor.submit(_do_embed, units)
                 ef.add_done_callback(lambda f: _on_embed_done(f, units))
                 return  # countdown happens inside _on_embed_done

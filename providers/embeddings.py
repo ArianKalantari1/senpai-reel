@@ -48,18 +48,26 @@ class VoyageProvider:
         """Embed a single string. Returns 512-dim float list."""
         return self.embed_batch([text])[0]
 
-    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+    def embed_batch(self, texts: List[str], rate_per_min: int = 3) -> List[List[float]]:
         """
         Batch-embed texts.  Voyage supports batches up to 128 items.
         Automatically splits larger lists into sub-batches.
+
+        rate_per_min: API calls per minute.  Default 3 = Voyage free-tier limit.
+        After adding a payment method the free tier becomes 300+ RPM; pass
+        rate_per_min=300 (or higher) once your billing is set up to skip the delay.
         """
+        import time
         if not texts:
             return []
 
         all_embeddings: List[List[float]] = []
         batch_size = 128
+        delay = 60.0 / max(rate_per_min, 1)  # seconds between API calls
 
-        for i in range(0, len(texts), batch_size):
+        for idx, i in enumerate(range(0, len(texts), batch_size)):
+            if idx > 0:
+                time.sleep(delay)
             batch = texts[i : i + batch_size]
             result = self._client.embed(
                 batch,
