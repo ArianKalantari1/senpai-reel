@@ -166,6 +166,40 @@ def test_archive_moves_video_and_records_location(media_db, tmp_path):
     assert row[2] is not None
 
 
+def test_archive_uses_client_visibility_with_shared_transcript(media_db, tmp_path):
+    from processing.media_archive import archive_ready_videos
+
+    seeded = _seed_ready_post(media_db, tmp_path, "shared_transcript")
+    active_client = "client_b"
+    now = datetime.utcnow()
+    archive_root = tmp_path / "external_archive"
+    archive_root.mkdir()
+
+    conn = duckdb.connect(media_db.DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO clients (client_id, name, niche, created_at)
+            VALUES (?, 'Client B', 'Career', ?)
+            """,
+            [active_client, now],
+        )
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+            [active_client, "shared_transcript", now],
+        )
+    finally:
+        conn.close()
+
+    result = archive_ready_videos(client_id=active_client, archive_dir=str(archive_root))
+
+    assert result["archived"] == 1
+    archived_path = Path(result["results"][0]["path"])
+    assert archived_path.parent.name == active_client
+    assert archived_path.exists()
+    assert not seeded["video_path"].exists()
+
+
 def test_missing_source_is_not_marked_archived(media_db, tmp_path):
     from processing.media_archive import archive_video_if_ready
 

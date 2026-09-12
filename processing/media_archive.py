@@ -167,10 +167,10 @@ def _post_archive_state(post_id: str, client_id: str) -> Optional[dict]:
                 t.post_id IS NOT NULL AS has_transcript
             FROM posts p
             JOIN client_posts cp ON p.post_id = cp.post_id
-            LEFT JOIN transcripts t ON t.post_id = p.post_id AND t.client_id = ?
+            LEFT JOIN transcripts t ON t.post_id = p.post_id
             WHERE p.post_id = ? AND cp.client_id = ?
             """,
-            [client_id, post_id, client_id],
+            [post_id, client_id],
         ).fetchone()
     finally:
         conn.close()
@@ -293,7 +293,7 @@ def archive_ready_videos(
             SELECT p.post_id
             FROM posts p
             JOIN client_posts cp ON p.post_id = cp.post_id
-            JOIN transcripts t ON t.post_id = p.post_id AND t.client_id = ?
+            JOIN transcripts t ON t.post_id = p.post_id
             WHERE cp.client_id = ?
               AND p.archived_video_path IS NULL
               AND p.local_video_path IS NOT NULL
@@ -301,7 +301,7 @@ def archive_ready_videos(
               AND p.local_audio_path IS NOT NULL
               AND p.local_audio_path != ''
             """,
-            [client_id, client_id],
+            [client_id],
         ).fetchall()
     finally:
         conn.close()
