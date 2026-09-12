@@ -4,6 +4,7 @@ Phase 3 — Deepgram transcription engine.
 Provides:
   - DeepgramTranscriber   — primary, Nova-2 with word-level timestamps
   - WhisperTranscriber    — fallback via OpenAI Whisper-1
+  - AssemblyAIProvider    — AssemblyAI Universal-2
   - TranscriptResult      — shared dataclass
   - transcribe_post()     — convenience wrapper that persists to DB
 """
@@ -12,14 +13,16 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import ClassVar, List, Optional, Protocol, runtime_checkable
 from datetime import datetime
 
 import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
+from core.secrets import get_secret
 from processing.concurrency import run_db_write
 from processing.media_archive import archive_video_if_ready
 
@@ -27,6 +30,17 @@ logger = logging.getLogger(__name__)
 
 # Deepgram pricing: $0.0058 / minute for Nova-2 (pre-recorded)
 _DEEPGRAM_COST_PER_MIN = 0.0058
+
+
+@runtime_checkable
+class TranscriptionProvider(Protocol):
+    """Provider seam for speech-to-text implementations."""
+
+    name: ClassVar[str]
+    secret_name: ClassVar[str]
+
+    def transcribe(self, audio_path: str, post_id: str) -> "TranscriptResult":
+        ...
 
 
 @dataclass
@@ -59,6 +73,8 @@ class TranscriptResult:
 class DeepgramTranscriber:
     """Transcribe audio using Deepgram Nova-2."""
 
+    name = "deepgram"
+    secret_name = "DEEPGRAM_API_KEY"
     API_URL = "https://api.deepgram.com/v1/listen"
 
     def __init__(self, api_key: str):
@@ -132,6 +148,8 @@ class DeepgramTranscriber:
 class WhisperTranscriber:
     """Fallback: OpenAI Whisper-1."""
 
+    name = "whisper"
+    secret_name = "OPENAI_API_KEY"
     API_URL = "https://api.openai.com/v1/audio/transcriptions"
 
     def __init__(self, api_key: str):
@@ -173,6 +191,204 @@ class WhisperTranscriber:
             cost_usd=round(cost, 6),
             raw_response=raw,
         )
+
+
+class _AssemblyAIClient:
+    """Small REST client for local-file AssemblyAI transcription."""
+
+    BASE_URL = "https://api.assemblyai.com"
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = BASE_URL,
+        timeout_sec: int = 120,
+        poll_interval_sec: float = 3.0,
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._headers = {"authorization": api_key}
+        self._timeout_sec = timeout_sec
+        self._poll_interval_sec = poll_interval_sec
+
+    def transcribe_file(
+        self,
+        audio_path: Path,
+        *,
+        speech_models: list[str],
+        language_code: Optional[str],
+        word_boost: list[str],
+    ) -> dict:
+        upload_url = self._upload(audio_path)
+        payload = {
+            "audio_url": upload_url,
+            "speech_models": speech_models,
+        }
+        if language_code:
+            payload["language_code"] = language_code
+        if word_boost:
+            payload["word_boost"] = word_boost
+
+        submitted = self._post_json("/v2/transcript", payload)
+        transcript_id = submitted["id"]
+        return self._poll(transcript_id)
+
+    def _upload(self, audio_path: Path) -> str:
+        with open(audio_path, "rb") as f:
+            resp = requests.post(
+                f"{self._base_url}/v2/upload",
+                headers=self._headers,
+                data=f,
+                timeout=self._timeout_sec,
+            )
+        self._raise_for_status(resp)
+        return resp.json()["upload_url"]
+
+    def _post_json(self, path: str, payload: dict) -> dict:
+        resp = requests.post(
+            f"{self._base_url}{path}",
+            headers={**self._headers, "content-type": "application/json"},
+            json=payload,
+            timeout=self._timeout_sec,
+        )
+        self._raise_for_status(resp)
+        return resp.json()
+
+    def _poll(self, transcript_id: str) -> dict:
+        deadline = time.monotonic() + self._timeout_sec
+        url = f"{self._base_url}/v2/transcript/{transcript_id}"
+        while True:
+            resp = requests.get(url, headers=self._headers, timeout=self._timeout_sec)
+            self._raise_for_status(resp)
+            payload = resp.json()
+            status = payload.get("status")
+            if status == "completed":
+                return payload
+            if status == "error":
+                raise RuntimeError(f"AssemblyAI transcription failed: {payload.get('error')}")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"AssemblyAI transcription timed out: {transcript_id}")
+            time.sleep(self._poll_interval_sec)
+
+    @staticmethod
+    def _raise_for_status(resp):
+        if resp.status_code == 401:
+            raise PermissionError("Invalid AssemblyAI API key")
+        resp.raise_for_status()
+
+
+class AssemblyAIProvider:
+    """Transcribe local audio files using AssemblyAI Universal-2."""
+
+    name = "assemblyai"
+    secret_name = "ASSEMBLYAI_API_KEY"
+    MODEL = "universal-2"
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        client: Optional[_AssemblyAIClient] = None,
+        language_code: str = "en_au",
+        word_boost: Optional[list[str]] = None,
+    ):
+        if not api_key:
+            raise ValueError("ASSEMBLYAI_API_KEY is required")
+        self._client = client or _AssemblyAIClient(api_key)
+        self._language_code = language_code
+        self._word_boost = list(word_boost or [])
+
+    def transcribe(self, audio_path: str, post_id: str) -> TranscriptResult:
+        path = Path(audio_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        raw = self._client.transcribe_file(
+            path,
+            speech_models=[self.MODEL],
+            language_code=self._language_code,
+            word_boost=self._word_boost,
+        )
+
+        words = [
+            WordTimestamp(
+                word=word.get("text") or word.get("word"),
+                start_sec=_ms_to_sec(word.get("start")),
+                end_sec=_ms_to_sec(word.get("end")),
+                confidence=word.get("confidence"),
+            )
+            for word in _assemblyai_words(raw)
+            if word.get("text") or word.get("word")
+        ]
+
+        return TranscriptResult(
+            post_id=post_id,
+            provider="assemblyai",
+            model=raw.get("speech_model_used") or self.MODEL,
+            transcript=raw.get("text") or "",
+            language=raw.get("language_code"),
+            confidence=raw.get("confidence"),
+            duration_sec=raw.get("audio_duration"),
+            words=words,
+            cost_usd=None,
+            raw_response=raw,
+        )
+
+
+def _ms_to_sec(value):
+    if value is None:
+        return None
+    return value / 1000.0
+
+
+def _assemblyai_words(raw: dict) -> list[dict]:
+    words = raw.get("words") or []
+    if words:
+        return words
+
+    utterance_words = []
+    for utterance in raw.get("utterances") or []:
+        utterance_words.extend(utterance.get("words") or [])
+    return utterance_words
+
+
+TRANSCRIPTION_PROVIDERS: dict[str, type[TranscriptionProvider]] = {
+    DeepgramTranscriber.name: DeepgramTranscriber,
+    WhisperTranscriber.name: WhisperTranscriber,
+    AssemblyAIProvider.name: AssemblyAIProvider,
+}
+
+
+def _normalise_provider_name(provider: str) -> str:
+    return str(provider or "").strip().lower()
+
+
+def get_transcription_provider_class(provider: str) -> type[TranscriptionProvider]:
+    provider_name = _normalise_provider_name(provider)
+    try:
+        return TRANSCRIPTION_PROVIDERS[provider_name]
+    except KeyError as exc:
+        available = ", ".join(sorted(TRANSCRIPTION_PROVIDERS))
+        raise ValueError(
+            f"Unknown transcription provider `{provider}`. Available providers: {available}."
+        ) from exc
+
+
+def resolve_transcription_api_key(
+    provider: str,
+    api_key: Optional[str] = None,
+    st_module=None,
+) -> str:
+    """Resolve the API key for the requested provider, preserving explicit overrides."""
+    provider_name = _normalise_provider_name(provider)
+    provider_class = get_transcription_provider_class(provider_name)
+    secret_name = provider_class.secret_name
+    resolved = str(api_key).strip() if api_key is not None else get_secret(secret_name, st_module)
+    if not resolved:
+        raise ValueError(
+            f"`{secret_name}` is required for transcription provider `{provider_name}`."
+        )
+    return resolved
 
 
 def save_transcript(result: TranscriptResult):
@@ -241,7 +457,7 @@ def save_transcript(result: TranscriptResult):
 
 def transcribe_post(
     post_id: str,
-    api_key: str,
+    api_key: Optional[str] = None,
     provider: str = "deepgram",
     client_id: str = DEFAULT_CLIENT_ID,
 ) -> TranscriptResult:
@@ -250,8 +466,8 @@ def transcribe_post(
 
     Args:
         post_id:  The post to transcribe
-        api_key:  API key for the chosen provider
-        provider: 'deepgram' (default) or 'whisper'
+        api_key:  Optional API key override for the chosen provider
+        provider: 'deepgram' (default), 'whisper', or 'assemblyai'
 
     Returns:
         TranscriptResult
@@ -281,14 +497,15 @@ def transcribe_post(
 def transcribe_audio_file(
     audio_path: str,
     post_id: str,
-    api_key: str,
+    api_key: Optional[str] = None,
     provider: str = "deepgram",
     client_id: str = DEFAULT_CLIENT_ID,
 ) -> TranscriptResult:
     """Transcribe an already-resolved audio path without reading the DB."""
-    transcriber = (
-        DeepgramTranscriber(api_key) if provider == "deepgram" else WhisperTranscriber(api_key)
-    )
+    provider_name = _normalise_provider_name(provider)
+    transcriber_class = get_transcription_provider_class(provider_name)
+    resolved_api_key = resolve_transcription_api_key(provider_name, api_key)
+    transcriber = transcriber_class(resolved_api_key)
     result = transcriber.transcribe(audio_path, post_id)
     result.client_id = client_id
     return result

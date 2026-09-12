@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import duckdb
 import pytest
@@ -122,3 +123,49 @@ def test_transcription_queue_missing_key_returns_named_error(pipeline_db):
     assert result["errors"]
     assert "Transcription is not configured" in result["errors"][0]["error"]
     assert "DEEPGRAM_API_KEY" in result["errors"][0]["error"]
+
+
+def test_transcription_queue_missing_assemblyai_key_names_provider(pipeline_db):
+    from processing.transcription_queue import run_transcription_queue
+
+    result = run_transcription_queue("", provider="assemblyai", client_id=pipeline_db.DEFAULT_CLIENT_ID)
+
+    assert result["done"] == 0
+    assert result["failed"] == 0
+    assert result["errors"]
+    assert "ASSEMBLYAI_API_KEY" in result["errors"][0]["error"]
+    assert "assemblyai" in result["errors"][0]["error"]
+
+
+def test_transcription_stage_does_not_pass_deepgram_key_to_other_providers(pipeline_db):
+    from core.pipeline import run_transcription_stage
+
+    now = datetime.utcnow()
+    conn = duckdb.connect(pipeline_db.DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO posts (
+            post_id, client_id, account_id, download_status, scraped_at,
+            video_url, local_audio_path, hashtags, mentions
+        )
+        VALUES ('assembly_pending', ?, 'acc1', 'done', ?, 'https://cdn.example/video.mp4',
+                '/tmp/audio.wav', [], [])
+        """,
+        [pipeline_db.DEFAULT_CLIENT_ID, now],
+    )
+    conn.execute(
+        "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, 'assembly_pending', ?)",
+        [pipeline_db.DEFAULT_CLIENT_ID, now],
+    )
+    conn.close()
+
+    queue_result = {"done": 0, "failed": 0, "total": 0, "total_cost_usd": 0.0, "errors": []}
+    with patch("processing.transcription_queue.run_transcription_queue", return_value=queue_result) as queue:
+        run_transcription_stage(
+            pipeline_db.DEFAULT_CLIENT_ID,
+            "deepgram-key",
+            provider="assemblyai",
+        )
+
+    assert queue.call_args.args[0] is None
+    assert queue.call_args.kwargs["provider"] == "assemblyai"

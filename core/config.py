@@ -26,6 +26,11 @@ REQUIRED_SECRETS = {
         "Deepgram API key",
         "transcribing downloaded audio",
     ),
+    "ASSEMBLYAI_API_KEY": RequiredSecret(
+        "ASSEMBLYAI_API_KEY",
+        "AssemblyAI API key",
+        "transcribing downloaded audio with AssemblyAI",
+    ),
     "OPENAI_API_KEY": RequiredSecret(
         "OPENAI_API_KEY",
         "OpenAI API key",
