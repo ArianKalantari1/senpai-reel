@@ -232,7 +232,7 @@ def _existing_archive_match(root: Path, client_id: str, src: Path) -> Optional[P
 
     pattern = re.compile(rf"^{re.escape(src.stem)}_(\d+){re.escape(src.suffix)}$")
     candidates = []
-    for candidate in dest_dir.glob(f"{src.stem}_*{src.suffix}"):
+    for candidate in dest_dir.iterdir():
         if not candidate.is_file():
             continue
         match = pattern.match(candidate.name)
@@ -280,10 +280,15 @@ def reconcile_orphaned_archives(
             SELECT p.post_id, p.local_video_path
             FROM posts p
             JOIN client_posts cp ON p.post_id = cp.post_id
+            JOIN transcripts t ON t.post_id = p.post_id
             WHERE cp.client_id = ?
               AND p.archived_video_path IS NULL
               AND p.local_video_path IS NOT NULL
               AND p.local_video_path != ''
+              AND p.local_audio_path IS NOT NULL
+              AND p.local_audio_path != ''
+              AND p.keyframes_dir IS NOT NULL
+              AND p.keyframes_dir != ''
             """,
             [client_id],
         ).fetchall()
