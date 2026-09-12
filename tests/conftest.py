@@ -80,7 +80,10 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
         posted_at TIMESTAMP, scraped_at TIMESTAMP, video_url TEXT,
         audio_url TEXT, thumbnail_url TEXT, is_pinned BOOLEAN DEFAULT FALSE,
         is_sponsored BOOLEAN DEFAULT FALSE, engagement_rate DOUBLE DEFAULT 0,
-        local_video_path TEXT, local_audio_path TEXT,
+        local_video_path TEXT, archived_video_path TEXT,
+        video_archived_at TIMESTAMP, local_audio_path TEXT,
+        keyframes_dir TEXT, keyframes_extracted_at TIMESTAMP,
+        keyframe_count INTEGER,
         download_status TEXT DEFAULT 'pending',
         downloaded_at TIMESTAMP, file_size_mb DOUBLE, raw_json JSON
     )""")

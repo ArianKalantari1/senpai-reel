@@ -550,6 +550,46 @@ def run_transcription_stage(
     )
 
 
+def run_archive_stage(
+    client_id: str,
+    progress_callback: ProgressCallback = None,
+) -> dict:
+    stage = "Archive"
+    started = time.monotonic()
+
+    from processing.media_archive import ARCHIVE_ENV, archive_ready_videos, configured_archive_dir
+
+    root = configured_archive_dir()
+    if root is None:
+        return _stage_result(
+            stage,
+            "skipped",
+            message=f"Video archive is not configured. Set `{ARCHIVE_ENV}` to move processed source videos.",
+        )
+    if not root.exists() or not root.is_dir():
+        return _stage_result(
+            stage,
+            "skipped",
+            message="Video archive target is not reachable. Source videos were left in place.",
+        )
+
+    def _archive_progress(done, total, post_id, result):
+        reason = result.get("reason")
+        message = f"Archived {post_id}" if result["status"] == "archived" else f"Skipped {post_id}: {reason}"
+        _emit(progress_callback, started, stage, done, total, post_id, message)
+
+    result = archive_ready_videos(client_id=client_id, progress_callback=_archive_progress)
+    status = "skipped" if result["total"] == 0 else "done"
+    return _stage_result(
+        stage,
+        status,
+        done=result["archived"],
+        failed=0,
+        total=result["total"],
+        message=f"Archived {result['archived']} source videos; kept {result['skipped']} in place.",
+    )
+
+
 def run_extraction_stage(
     client_id: str,
     openai_api_key: str,
@@ -701,6 +741,10 @@ def run_everything_pending(
                     progress_callback=locked_progress,
                     io_workers=io_workers,
                 ),
+            ),
+            (
+                "Archive",
+                lambda: run_archive_stage(client_id, locked_progress),
             ),
             (
                 "Extract",

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
 from processing.concurrency import cpu_worker_count, run_bounded, run_db_write
+from processing.media_archive import extract_keyframes, keyframes_available, record_keyframes
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ def extract_audio_for_post(post_id: str, client_id: str = DEFAULT_CLIENT_ID) -> 
     conn = get_connection()
     row = conn.execute(
         """
-        SELECT p.local_video_path, p.local_audio_path
+        SELECT p.local_video_path, p.local_audio_path, p.keyframes_dir
         FROM posts p
         JOIN client_posts cp ON p.post_id = cp.post_id
         WHERE p.post_id = ? AND cp.client_id = ?
@@ -93,17 +94,35 @@ def extract_audio_for_post(post_id: str, client_id: str = DEFAULT_CLIENT_ID) -> 
     if not row:
         return {"success": False, "path": None, "error": f"post_id {post_id} not found"}
 
-    video_path, existing_audio = row
-    if not video_path:
-        return {"success": False, "path": None, "error": "No local_video_path for this post"}
-
-    if existing_audio and Path(existing_audio).exists():
+    video_path, existing_audio, existing_keyframes = row
+    audio_exists = bool(existing_audio and Path(existing_audio).exists())
+    if audio_exists and keyframes_available(existing_keyframes):
         return {"success": True, "path": existing_audio, "error": None}
 
-    result = extract_audio(video_path)
-    if result["success"]:
-        _update_audio_path(post_id, result["path"])
-    return result
+    if not video_path or not Path(video_path).exists():
+        if audio_exists:
+            return {"success": True, "path": existing_audio, "error": None}
+        return {"success": False, "path": None, "error": "No local video file for this post"}
+
+    audio_result = {"success": True, "path": existing_audio, "error": None}
+    if not audio_exists:
+        audio_result = extract_audio(video_path)
+        if audio_result["success"]:
+            _update_audio_path(post_id, audio_result["path"])
+
+    keyframe_result = {"success": True, "path": existing_keyframes, "count": None, "error": None}
+    if not keyframes_available(existing_keyframes):
+        keyframe_result = extract_keyframes(video_path, post_id)
+        if keyframe_result["success"]:
+            record_keyframes(post_id, keyframe_result["path"], keyframe_result["count"])
+
+    if audio_result["success"] and keyframe_result["success"]:
+        return {"success": True, "path": audio_result["path"], "error": None}
+    return {
+        "success": False,
+        "path": audio_result.get("path"),
+        "error": audio_result.get("error") or keyframe_result.get("error"),
+    }
 
 
 def _update_audio_path(post_id: str, audio_path: str):
@@ -136,13 +155,19 @@ def extract_audio_for_downloaded_posts(
     conn = get_connection()
     rows = conn.execute(
         """
-        SELECT p.post_id, p.local_video_path
+        SELECT p.post_id, p.local_video_path, p.local_audio_path, p.keyframes_dir
         FROM posts p
         JOIN client_posts cp ON p.post_id = cp.post_id
         WHERE cp.client_id = ?
           AND p.download_status = 'done'
           AND p.local_video_path IS NOT NULL
-          AND (p.local_audio_path IS NULL OR p.local_audio_path = '')
+          AND p.local_video_path != ''
+          AND (
+              p.local_audio_path IS NULL
+              OR p.local_audio_path = ''
+              OR p.keyframes_dir IS NULL
+              OR p.keyframes_dir = ''
+          )
         """,
         [client_id],
     ).fetchall()
@@ -152,11 +177,27 @@ def extract_audio_for_downloaded_posts(
     done = failed = 0
 
     def _extract(row):
-        post_id, video_path = row
-        result = extract_audio(video_path)
-        if result["success"]:
-            _update_audio_path(post_id, result["path"])
-        return result
+        post_id, video_path, existing_audio, existing_keyframes = row
+        audio_exists = bool(existing_audio and Path(existing_audio).exists())
+        audio_result = {"success": True, "path": existing_audio, "error": None}
+        if not audio_exists:
+            audio_result = extract_audio(video_path)
+            if audio_result["success"]:
+                _update_audio_path(post_id, audio_result["path"])
+
+        keyframe_result = {"success": True, "path": existing_keyframes, "count": None, "error": None}
+        if not keyframes_available(existing_keyframes):
+            keyframe_result = extract_keyframes(video_path, post_id)
+            if keyframe_result["success"]:
+                record_keyframes(post_id, keyframe_result["path"], keyframe_result["count"])
+
+        if audio_result["success"] and keyframe_result["success"]:
+            return {"success": True, "path": audio_result["path"], "error": None}
+        return {
+            "success": False,
+            "path": audio_result.get("path"),
+            "error": audio_result.get("error") or keyframe_result.get("error"),
+        }
 
     def _progress(count, count_total, row, result, error):
         if progress_callback:
