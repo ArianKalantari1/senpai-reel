@@ -1,13 +1,21 @@
+# Everything the app needs to scrape, transcribe, analyse and generate.
+# Installs in well under a minute — no PyTorch, no CUDA, no model downloads.
+#
+#   pip install -r requirements.txt
+#
+# System prerequisite: ffmpeg  (macOS: brew install ffmpeg)
+# Legacy/experimental modules need requirements-optional.txt — see that file.
+
 # Core
 streamlit==1.51.0
 duckdb==1.4.2
 requests==2.32.5
+pandas==2.2.3
 
-# Media
+# Media acquisition
 yt-dlp==2025.11.12
 
-# AI / ML
-openai-whisper==20250625
+# Charts
 plotly==6.5.0
 
 # Testing

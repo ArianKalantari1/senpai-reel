@@ -1,8 +1,88 @@
-# Senpai Reel — Full Project Documentation
+# Senpai Reel
 
-> **Purpose of this document:** A detailed, consultant-ready breakdown of everything that has been built, how it works behind the scenes, what the current state is, and where the gaps are. Use this as the planning foundation for the next phase.
+Scrapes competitor Instagram Reels, transcribes them, extracts structured
+insights, and generates grounded content from what it finds.
 
 ---
+
+## Quickstart
+
+**Prerequisites:** Python 3.10+ and ffmpeg.
+
+```bash
+# macOS
+brew install ffmpeg
+```
+
+**Setup — one command, safe to re-run:**
+
+```bash
+git clone https://github.com/ArianKalantari1/senpai-reel.git
+cd senpai-reel
+./setup.sh
+```
+
+That creates a virtualenv, installs dependencies, sets up `secrets.toml`,
+initialises the database and runs the tests. It takes well under a minute —
+nothing here needs PyTorch or a model download.
+
+**Add your API keys** to `.streamlit/secrets.toml`:
+
+| Key | Needed for | Without it |
+|---|---|---|
+| `APIFY_TOKEN` | scraping | nothing to analyse |
+| `DEEPGRAM_API_KEY` | transcription | reels download but stay silent |
+| `OPENAI_API_KEY` | extraction, search, generation | no insights, keyword search only |
+| `APIFY_USD_PER_RESULT` | *optional* — cost tracking | scrape cost shows as unknown |
+
+There is no default Apify rate on purpose: Apify prices in credits and the
+effective rate depends on your plan, so a guessed number would be confidently
+wrong. Set it to your real per-result cost, or the Costs page reports totals as
+incomplete rather than understating them.
+
+**Run it:**
+
+```bash
+source .venv/bin/activate
+streamlit run app.py
+```
+
+**Then, in the app:**
+
+1. **Client** (sidebar) — pick or create one. Each client is a separate niche
+   with its own competitor accounts and its own topic vocabulary.
+2. **Pipeline** — add a competitor handle, then **Run everything pending**.
+   It chains scrape → download → audio → transcribe → extract → embed, with
+   live counts at each stage.
+3. **Search**, **Analytics**, **Content Studio** — what the data is for.
+
+First run on one account takes a few minutes, most of it scraping and
+transcription.
+
+### Costs
+
+About **⅓ of a cent per 30-second reel**, all in — Deepgram $0.0029,
+GPT-4o-mini extraction $0.0003, embeddings a rounding error. Apify is the only
+meaningful recurring cost. The **Costs** page breaks it down per client.
+
+### Optional extras
+
+`requirements-optional.txt` covers legacy and experimental modules — graph
+analysis, local Whisper, the OpenCV video analyzer. **You almost certainly do
+not need it.** It is separated because `openai-whisper` alone pulls PyTorch,
+which is gigabytes, and nothing in the running app imports it.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| Transcription does nothing | `DEEPGRAM_API_KEY` missing — check Settings |
+| Downloads fail on older reels | Apify CDN links expire in 24–48h; scrape and download together |
+| "Pipeline busy" that never clears | a run was interrupted; the Pipeline page offers a force release once its heartbeat goes stale |
+| Everything classifies as "General" | that client has no topics yet — add them for its niche |
+
+---
+
 
 ## Table of Contents
 

@@ -1,0 +1,28 @@
+# Heavy dependencies for modules that are NOT part of the active pipeline.
+#
+# You almost certainly do not need this file. It exists so the main install
+# stays fast: openai-whisper alone pulls PyTorch, which is gigabytes and
+# several minutes, and nothing in the running app imports it.
+#
+#   pip install -r requirements-optional.txt
+#
+# What needs what:
+#   analysis/audio_analyzer.py        openai-whisper, librosa, soundfile, moviepy
+#   analysis/ai_video_analyzer.py     opencv-python  (uses a retired vision model)
+#   analysis/engagement_predictor.py  scikit-learn, joblib, numpy
+#   graph/*                           networkx, python-louvain
+#
+# The Streamlit pages for these are underscore-prefixed, so Streamlit hides
+# them. Transcription in the live pipeline uses Deepgram over HTTP, and the
+# OpenAI fallback is the whisper-1 *API* — neither needs the local package.
+
+openai-whisper==20250625
+librosa
+soundfile
+moviepy
+opencv-python
+scikit-learn
+joblib
+numpy
+networkx
+python-louvain
