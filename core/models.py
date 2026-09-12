@@ -45,7 +45,12 @@ class Post:
     is_sponsored: bool = False
     engagement_rate: float = 0.0
     local_video_path: Optional[str] = None
+    archived_video_path: Optional[str] = None
+    video_archived_at: Optional[datetime] = None
     local_audio_path: Optional[str] = None
+    keyframes_dir: Optional[str] = None
+    keyframes_extracted_at: Optional[datetime] = None
+    keyframe_count: Optional[int] = None
     download_status: str = "pending"   # pending | done | failed | skipped
     raw_json: Optional[dict] = None
 

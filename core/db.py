@@ -285,7 +285,12 @@ def init_db():
         is_sponsored     BOOLEAN DEFAULT FALSE,
         engagement_rate  DOUBLE DEFAULT 0,
         local_video_path TEXT,
+        archived_video_path TEXT,
+        video_archived_at TIMESTAMP,
         local_audio_path TEXT,
+        keyframes_dir    TEXT,
+        keyframes_extracted_at TIMESTAMP,
+        keyframe_count   INTEGER,
         download_status  TEXT DEFAULT 'pending',
         downloaded_at    TIMESTAMP,
         file_size_mb     DOUBLE,
@@ -451,6 +456,11 @@ def init_db():
     for col, typedef in [
         ("downloaded_at", "TIMESTAMP"),
         ("file_size_mb", "DOUBLE"),
+        ("archived_video_path", "TEXT"),
+        ("video_archived_at", "TIMESTAMP"),
+        ("keyframes_dir", "TEXT"),
+        ("keyframes_extracted_at", "TIMESTAMP"),
+        ("keyframe_count", "INTEGER"),
     ]:
         _add_column_if_missing(conn, "posts", col, typedef)
 
