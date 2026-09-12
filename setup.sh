@@ -105,9 +105,29 @@ ok "dependencies installed"
 mkdir -p .streamlit
 if [ ! -f .streamlit/secrets.toml ]; then
   cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+  # cp leaves the file at the umask default, typically 644 — world-readable.
+  # This file is about to hold live API keys, so restrict it to the owner
+  # before anything is written into it, not after.
+  chmod 600 .streamlit/secrets.toml
   warn "created .streamlit/secrets.toml from the example — add your API keys"
   NEEDS_KEYS=1
 else
+  # An existing file may predate the chmod above, or have been created by hand.
+  # GNU and BSD stat disagree on flags, and -f is VALID on GNU (filesystem
+  # status), so a plain `||` fallback silently yields garbage rather than
+  # failing over. Try each and keep the answer only if it is octal digits.
+  _file_mode() {
+    local mode
+    mode=$(stat -c '%a' "$1" 2>/dev/null || true)      # GNU
+    case "$mode" in ''|*[!0-7]*) mode=$(stat -f '%Lp' "$1" 2>/dev/null || true);; esac  # BSD
+    case "$mode" in ''|*[!0-7]*) mode="";; esac
+    printf '%s' "$mode"
+  }
+  SECRETS_MODE=$(_file_mode .streamlit/secrets.toml)
+  if [ -n "$SECRETS_MODE" ] && [ "$SECRETS_MODE" != "600" ]; then
+    chmod 600 .streamlit/secrets.toml
+    warn "tightened .streamlit/secrets.toml from ${SECRETS_MODE} to 600 (was readable by other accounts)"
+  fi
   if grep -q "YOUR_TOKEN_HERE\|YOUR_KEY_HERE" .streamlit/secrets.toml; then
     warn ".streamlit/secrets.toml still has placeholder values"
     NEEDS_KEYS=1
