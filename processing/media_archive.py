@@ -223,10 +223,12 @@ def archive_video_if_ready(
     post_id: str,
     client_id: str = DEFAULT_CLIENT_ID,
     archive_dir: Optional[str] = None,
+    ensure_schema: bool = True,
 ) -> dict:
     """Archive a source video only after all derived local assets exist."""
 
-    init_db()
+    if ensure_schema:
+        init_db()
     state = _post_archive_state(post_id, client_id)
     if not state:
         return {"status": "skipped", "reason": "post_not_found", "post_id": post_id}
@@ -310,7 +312,12 @@ def archive_ready_videos(
     archived = skipped = 0
     results = []
     for index, (post_id,) in enumerate(rows, start=1):
-        result = archive_video_if_ready(post_id, client_id=client_id, archive_dir=archive_dir)
+        result = archive_video_if_ready(
+            post_id,
+            client_id=client_id,
+            archive_dir=archive_dir,
+            ensure_schema=False,
+        )
         results.append(result)
         if result["status"] == "archived":
             archived += 1
