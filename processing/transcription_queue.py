@@ -12,7 +12,11 @@ from typing import Callable, Optional
 from core.db import DEFAULT_CLIENT_ID, get_connection
 from processing.concurrency import io_worker_count, run_bounded, run_db_write
 from processing.media_archive import archive_video_if_ready
-from processing.transcribe import save_transcript, transcribe_audio_file
+from processing.transcribe import (
+    resolve_transcription_api_key,
+    save_transcript,
+    transcribe_audio_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,7 @@ def get_transcription_stats(client_id: str = DEFAULT_CLIENT_ID) -> dict:
 
 
 def run_transcription_queue(
-    api_key: str,
+    api_key: Optional[str] = None,
     provider: str = "deepgram",
     batch_size: int = 10,
     progress_callback: Optional[Callable] = None,
@@ -73,16 +77,17 @@ def run_transcription_queue(
     Transcribe posts with audio but no transcript yet.
 
     Args:
-        api_key:           API key (Deepgram or OpenAI depending on provider)
-        provider:          'deepgram' or 'whisper'
+        api_key:           Optional API key override for the chosen provider
+        provider:          'deepgram', 'whisper', or 'assemblyai'
         batch_size:        Max posts to process per run
         progress_callback: Optional callable(done, total, post_id, error)
 
     Returns:
         dict: done, failed, skipped, total_cost_usd
     """
-    if not api_key:
-        key_name = "DEEPGRAM_API_KEY" if provider == "deepgram" else "OPENAI_API_KEY"
+    try:
+        resolved_api_key = resolve_transcription_api_key(provider, api_key)
+    except ValueError as exc:
         return {
             "done": 0,
             "failed": 0,
@@ -91,7 +96,7 @@ def run_transcription_queue(
             "errors": [
                 {
                     "post_id": None,
-                    "error": f"Transcription is not configured. Add `{key_name}` in Settings.",
+                    "error": f"Transcription is not configured. {exc}",
                 }
             ],
         }
@@ -120,7 +125,7 @@ def run_transcription_queue(
 
     def _transcribe(row):
         post_id, audio_path = row
-        result = transcribe_audio_file(audio_path, post_id, api_key, provider, client_id)
+        result = transcribe_audio_file(audio_path, post_id, resolved_api_key, provider, client_id)
         run_db_write(save_transcript, result)
         archive_video_if_ready(post_id, client_id=client_id)
         return result
@@ -145,7 +150,7 @@ def run_transcription_queue(
             logger.warning("Transcription failed for %s: %s", post_id, err_msg)
         else:
             done += 1
-            total_cost += item.result.cost_usd
+            total_cost += item.result.cost_usd or 0.0
 
     return {
         "done": done,

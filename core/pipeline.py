@@ -515,38 +515,40 @@ def run_transcription_stage(
     if pending == 0:
         return _stage_result(stage, "skipped", message="No audio is waiting for transcription.")
 
-    if provider == "deepgram" and not deepgram_api_key:
-        return _stage_result(
-            stage,
-            "failed",
-            message="Transcription is not configured. Add `DEEPGRAM_API_KEY` in Settings.",
-        )
-
     from processing.transcription_queue import run_transcription_queue
 
     def _transcription_progress(done, total, post_id, err):
         _emit(progress_callback, started, stage, done, total, post_id, f"Transcribing {post_id}", err)
 
+    provider_name = str(provider or "").strip().lower()
+    api_key_override = deepgram_api_key if provider_name == "deepgram" and deepgram_api_key else None
+
     result = run_transcription_queue(
-        deepgram_api_key,
+        api_key_override,
         provider=provider,
         batch_size=batch_size,
         progress_callback=_transcription_progress,
         client_id=client_id,
         max_workers=io_workers,
     )
+    errors = result.get("errors", [])
     status = "failed" if result["total"] and result["failed"] and not result["done"] else "done"
+    if errors and result["total"] == 0:
+        status = "failed"
     if result["total"] == 0:
-        status = "skipped"
+        status = "skipped" if not errors else status
+    message = f"Transcribed audio. Cost this run: ${result['total_cost_usd']:.4f}."
+    if status == "failed" and errors:
+        message = errors[0]["error"]
     return _stage_result(
         stage,
         status,
         done=result["done"],
         failed=result["failed"],
         total=result["total"],
-        message=f"Transcribed audio. Cost this run: ${result['total_cost_usd']:.4f}.",
+        message=message,
         cost_usd=result["total_cost_usd"],
-        errors=result.get("errors", []),
+        errors=errors,
     )
 
 

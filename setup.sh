@@ -137,6 +137,7 @@ if [ "${NEEDS_KEYS:-0}" = "1" ]; then
   echo "Before scraping, add your keys to ${BOLD}.streamlit/secrets.toml${OFF}:"
   echo "  APIFY_TOKEN       required to scrape"
   echo "  DEEPGRAM_API_KEY  required to transcribe"
+  echo "  ASSEMBLYAI_API_KEY optional AssemblyAI transcription provider"
   echo "  OPENAI_API_KEY    required to extract and generate"
 fi
 echo

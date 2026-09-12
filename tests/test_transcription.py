@@ -214,6 +214,151 @@ class TestWhisperTranscriber:
         assert result.words == []  # Whisper doesn't return word timestamps
 
 
+# ── AssemblyAIProvider ───────────────────────────────────────────────────────
+
+class _FakeAssemblyAIClient:
+    def __init__(self, raw=None):
+        self.raw = raw or {
+            "text": "Portfolio tips now",
+            "language_code": "en_au",
+            "confidence": 0.91,
+            "audio_duration": 12.5,
+            "speech_model_used": "universal-2",
+            "words": [
+                {"text": "Portfolio", "start": 250, "end": 900, "confidence": 0.92},
+                {"text": "tips", "start": 1000, "end": 1300, "confidence": 0.89},
+            ],
+        }
+        self.calls = []
+
+    def transcribe_file(self, audio_path, *, speech_models, language_code, word_boost):
+        self.calls.append(
+            {
+                "audio_path": audio_path,
+                "speech_models": speech_models,
+                "language_code": language_code,
+                "word_boost": word_boost,
+            }
+        )
+        return self.raw
+
+
+class TestAssemblyAIProvider:
+    def test_empty_key_raises(self):
+        from processing.transcribe import AssemblyAIProvider
+        with pytest.raises(ValueError):
+            AssemblyAIProvider("")
+
+    def test_missing_file_raises(self, tmp_path):
+        from processing.transcribe import AssemblyAIProvider
+
+        t = AssemblyAIProvider("key", client=_FakeAssemblyAIClient())
+        with pytest.raises(FileNotFoundError):
+            t.transcribe(str(tmp_path / "missing.wav"), "p1")
+
+    def test_successful_transcription_converts_word_timestamps(self, tmp_path):
+        from processing.transcribe import AssemblyAIProvider, TranscriptResult
+
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"fake")
+        client = _FakeAssemblyAIClient()
+
+        t = AssemblyAIProvider("key", client=client)
+        result = t.transcribe(str(audio_file), "p_assembly")
+
+        assert isinstance(result, TranscriptResult)
+        assert result.provider == "assemblyai"
+        assert result.model == "universal-2"
+        assert result.transcript == "Portfolio tips now"
+        assert result.language == "en_au"
+        assert result.confidence == pytest.approx(0.91)
+        assert result.duration_sec == pytest.approx(12.5)
+        assert result.cost_usd is None
+        assert result.words[0].word == "Portfolio"
+        assert result.words[0].start_sec == pytest.approx(0.25)
+        assert result.words[0].end_sec == pytest.approx(0.9)
+        assert client.calls[0]["speech_models"] == ["universal-2"]
+        assert client.calls[0]["word_boost"] == []
+
+    def test_word_boost_is_explicit_and_defaults_empty(self, tmp_path):
+        from processing.transcribe import AssemblyAIProvider
+
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"fake")
+        client = _FakeAssemblyAIClient()
+
+        t = AssemblyAIProvider("key", client=client, word_boost=["bespoke-term"])
+        t.transcribe(str(audio_file), "p_boost")
+
+        assert client.calls[0]["word_boost"] == ["bespoke-term"]
+
+    def test_absent_numeric_fields_stay_none(self, tmp_path):
+        from processing.transcribe import AssemblyAIProvider
+
+        audio_file = tmp_path / "test.wav"
+        audio_file.write_bytes(b"fake")
+        client = _FakeAssemblyAIClient(
+            {
+                "text": "No metrics",
+                "language_code": "en_au",
+                "speech_model_used": "universal-2",
+                "words": [{"text": "No", "start": None, "end": None}],
+            }
+        )
+
+        result = AssemblyAIProvider("key", client=client).transcribe(str(audio_file), "p_null")
+
+        assert result.confidence is None
+        assert result.duration_sec is None
+        assert result.cost_usd is None
+        assert result.words[0].start_sec is None
+        assert result.words[0].end_sec is None
+        assert result.words[0].confidence is None
+
+
+# ── provider registry + key resolution ───────────────────────────────────────
+
+class TestTranscriptionProviderRegistry:
+    def test_registry_includes_all_transcription_providers(self):
+        from processing.transcribe import (
+            AssemblyAIProvider,
+            DeepgramTranscriber,
+            TRANSCRIPTION_PROVIDERS,
+            WhisperTranscriber,
+        )
+
+        assert TRANSCRIPTION_PROVIDERS["deepgram"] is DeepgramTranscriber
+        assert TRANSCRIPTION_PROVIDERS["whisper"] is WhisperTranscriber
+        assert TRANSCRIPTION_PROVIDERS["assemblyai"] is AssemblyAIProvider
+
+    def test_resolves_provider_specific_secret(self):
+        from processing.transcribe import resolve_transcription_api_key
+
+        with patch("processing.transcribe.get_secret", return_value="assembly-key") as get_secret:
+            key = resolve_transcription_api_key("assemblyai")
+
+        assert key == "assembly-key"
+        get_secret.assert_called_once_with("ASSEMBLYAI_API_KEY", None)
+
+    def test_explicit_api_key_overrides_secret_lookup(self):
+        from processing.transcribe import resolve_transcription_api_key
+
+        with patch("processing.transcribe.get_secret") as get_secret:
+            key = resolve_transcription_api_key("whisper", "override-key")
+
+        assert key == "override-key"
+        get_secret.assert_not_called()
+
+    def test_missing_key_names_provider_and_secret(self):
+        from processing.transcribe import resolve_transcription_api_key
+
+        with pytest.raises(ValueError) as exc:
+            resolve_transcription_api_key("assemblyai", "")
+
+        assert "ASSEMBLYAI_API_KEY" in str(exc.value)
+        assert "assemblyai" in str(exc.value)
+
+
 # ── save_transcript ───────────────────────────────────────────────────────────
 
 class TestSaveTranscript:
