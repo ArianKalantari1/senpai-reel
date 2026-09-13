@@ -176,12 +176,42 @@ def load_raw_fallback(account_filter, page):
     return pd.DataFrame(rows)
 
 
+# Counts are whole numbers that can be unknown. Plain float64 (what both pandas
+# and DuckDB give you for an int column containing NULL) renders 10 likes as
+# "10.0"; pandas' nullable Int64 keeps the integer and still carries missing.
+_COUNT_COLS = ("likes", "views", "comments_count")
+
+
+def _normalise_counts(frame):
+    for col in _COUNT_COLS:
+        if col in frame.columns:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce").astype("Int64")
+    return frame
+
+
+def _avg(frame, col, suffix=""):
+    """Mean of the known values, or em dash when nothing is known.
+
+    `.mean()` already skips missing, which is the behaviour we want — an average
+    over the counts we actually have. But an all-missing column means NaN, and
+    f"{nan:,.0f}" renders the literal string "nan" on the dashboard.
+    """
+    if col not in frame.columns:
+        return "—"
+    value = frame[col].mean()
+    if pd.isna(value):
+        return "—"
+    return f"{value:,.0f}{suffix}" if not suffix else f"{value:,.2f}{suffix}"
+
+
 with st.spinner("Loading…"):
     total_rows = _total_posts(selected_account)
     df, source_used = load_posts(selected_account, sort_by, st.session_state.data_page)
     if df.empty and st.session_state.data_page == 0:
         df = load_raw_fallback(selected_account, 0)
         source_used = "raw_scrapes (fallback)"
+    if not df.empty:
+        df = _normalise_counts(df)
 
 if df.empty and st.session_state.data_page == 0:
     conn.close()
@@ -197,9 +227,9 @@ last_row = min(first_row + len(df) - 1, total_rows)
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Total reels", f"{total_rows:,}")
-c2.metric("Avg Likes", f"{df['likes'].mean():,.0f}" if "likes" in df else "—")
-c3.metric("Avg Views", f"{df['views'].mean():,.0f}" if "views" in df else "—")
-c4.metric("Avg Engagement", f"{df['engagement_rate'].mean():.2f}%" if "engagement_rate" in df else "—")
+c2.metric("Avg Likes", _avg(df, "likes"))
+c3.metric("Avg Views", _avg(df, "views"))
+c4.metric("Avg Engagement", _avg(df, "engagement_rate", "%"))
 c5.metric("Source", source_used)
 
 st.markdown("---")
