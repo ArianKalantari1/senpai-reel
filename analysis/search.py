@@ -41,6 +41,7 @@ def semantic_search(
     topic_filter: Optional[str] = None,
     content_type_filter: Optional[str] = None,
     top_k: int = 20,
+    unit_role_filter: Optional[str] = None,
 ) -> List[SearchResult]:
     """
     Search message_units by semantic similarity.
@@ -71,6 +72,15 @@ def semantic_search(
         if content_type_filter and content_type_filter != "All":
             where_clauses.append("mu.content_type = ?")
             where_params.append(content_type_filter)
+
+        # Second axis (#27). "Unclassified" is selectable on purpose: it is how
+        # you see how much of the corpus has actually been reviewed.
+        if unit_role_filter and unit_role_filter != "All":
+            if unit_role_filter == "Unclassified":
+                where_clauses.append("mu.unit_role IS NULL")
+            else:
+                where_clauses.append("mu.unit_role = ?")
+                where_params.append(unit_role_filter)
 
         where_clauses.append(
             "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
@@ -133,6 +143,7 @@ def keyword_search(
     topic_filter: Optional[str] = None,
     top_k: int = 50,
     content_type_filter: Optional[str] = None,
+    unit_role_filter: Optional[str] = None,
 ) -> List[SearchResult]:
     """Fast keyword search (no embedding needed) — fallback when no API key."""
     client_id = _require_client_id(client_id)
@@ -148,6 +159,13 @@ def keyword_search(
         if content_type_filter and content_type_filter != "All":
             where_clauses.append("mu.content_type = ?")
             params.append(content_type_filter)
+
+        if unit_role_filter and unit_role_filter != "All":
+            if unit_role_filter == "Unclassified":
+                where_clauses.append("mu.unit_role IS NULL")
+            else:
+                where_clauses.append("mu.unit_role = ?")
+                params.append(unit_role_filter)
 
         where_clauses.append(
             "EXISTS (SELECT 1 FROM client_posts cp WHERE cp.post_id = mu.post_id AND cp.client_id = ?)"
