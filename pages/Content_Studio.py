@@ -5,6 +5,7 @@ st.set_page_config(page_title="Content Studio", page_icon="✍️", layout="wide
 st.title("Content Studio")
 
 from core.taxonomy import topic_names
+from analysis.unit_role import ROLES_EXCLUDED_FROM_GENERATION
 from analysis.search import keyword_search, semantic_search
 from core.client_context import render_client_selector
 from core.config import get_secret, missing_secret_message
@@ -116,9 +117,13 @@ else:
                 client_id,
                 topic_filter=topic,
                 top_k=10,
+                exclude_roles=ROLES_EXCLUDED_FROM_GENERATION,
             )
         except Exception:
-            results = keyword_search(ref_search, client_id, topic, 10)
+            results = keyword_search(
+                ref_search, client_id, topic, 10,
+                exclude_roles=ROLES_EXCLUDED_FROM_GENERATION,
+            )
 
         if results:
             st.write(f"Found {len(results)} insights — select which to use as reference:")
