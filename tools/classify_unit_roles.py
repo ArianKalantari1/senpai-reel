@@ -32,6 +32,33 @@ def _connect(db_path: str, read_only: bool):
     return duckdb.connect(db_path, read_only=read_only)
 
 
+_REQUIRED_COLUMNS = ("unit_role", "unit_role_source", "unit_role_confidence")
+
+
+def _require_schema(conn, db_path: str):
+    """Fail with an instruction, not a BinderException.
+
+    --dry-run opens the database read-only on purpose, so it cannot add the
+    columns itself. An existing database predates them, and every test builds a
+    fresh one through init_db() where they always exist — which is exactly why
+    this was not caught before a real database hit it.
+    """
+    present = {r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'message_units'").fetchall()}
+    missing = [c for c in _REQUIRED_COLUMNS if c not in present]
+    if not missing:
+        return
+    raise SystemExit(
+        f"\n  This database predates the unit_role columns: {', '.join(missing)}.\n\n"
+        "  --dry-run opens it read-only, so it cannot add them itself. Run the\n"
+        "  migration once — it is additive (ALTER TABLE ADD COLUMN), and it is\n"
+        "  the same thing the app does on every launch:\n\n"
+        f"      python -c \"import core.db as db; db.DB_PATH='{db_path}'; db.init_db()\"\n\n"
+        "  Then re-run this command.\n"
+    )
+
+
 def _fetch(conn, client_id):
     # No OR here, deliberately. This clause used to read
     #   "unit_role IS NULL OR unit_role_source IS DISTINCT FROM 'human'"
@@ -81,6 +108,7 @@ def main():
 
     conn = _connect(args.db, read_only=args.dry_run)
     try:
+        _require_schema(conn, args.db)
         rows = _fetch(conn, args.client)
         if not rows:
             print("\nNo units to classify. Either the table is empty or every row is "
