@@ -256,3 +256,58 @@ class TestGenerationExclusion:
         got = keyword_search("resume", "c1", top_k=50,
                              exclude_roles=ROLES_EXCLUDED_FROM_GENERATION)
         assert len(got) == 5
+class TestPreMigrationDatabase:
+    """The case CI never exercised: a database that predates the columns.
+
+    Every other test builds its database through init_db(), where unit_role
+    always exists. A real database does not, and --dry-run opens it read-only
+    so it cannot add the columns itself. That combination produced a raw
+    BinderException the first time this ran against real data.
+    """
+
+    def _legacy_db(self, tmp_path):
+        import duckdb
+        path = str(tmp_path / "legacy.duckdb")
+        conn = duckdb.connect(path)
+        # message_units as it looked before the unit_role migration
+        conn.execute(
+            "CREATE TABLE message_units (unit_id TEXT PRIMARY KEY, client_id TEXT, "
+            "post_id TEXT, text TEXT, claim TEXT, content_type TEXT, confidence DOUBLE)")
+        conn.execute("INSERT INTO message_units VALUES ('u1','c1','p1','link in bio','x','tip',0.9)")
+        conn.close()
+        return path
+
+    def _run(self, db_path, *args):
+        import subprocess, sys, pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        return subprocess.run(
+            [sys.executable, str(root / "tools" / "classify_unit_roles.py"),
+             "--db", db_path, *args],
+            capture_output=True, text=True, cwd=str(root))
+
+    def test_dry_run_explains_instead_of_crashing(self, tmp_path):
+        result = self._run(self._legacy_db(tmp_path), "--dry-run")
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "BinderException" not in combined, "a stack trace is not an error message"
+        assert "unit_role" in combined
+        # The message has to carry the fix, not just the diagnosis.
+        assert "init_db" in combined
+
+    def test_apply_explains_too(self, tmp_path):
+        result = self._run(self._legacy_db(tmp_path), "--apply")
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "BinderException" not in combined
+
+    def test_a_migrated_database_is_unaffected(self, tmp_path):
+        import duckdb
+        path = self._legacy_db(tmp_path)
+        conn = duckdb.connect(path)
+        for col, typ in (("unit_role", "TEXT"), ("unit_role_source", "TEXT"),
+                         ("unit_role_confidence", "DOUBLE")):
+            conn.execute(f"ALTER TABLE message_units ADD COLUMN {col} {typ}")
+        conn.close()
+        result = self._run(path, "--dry-run")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "DRY RUN" in result.stdout
