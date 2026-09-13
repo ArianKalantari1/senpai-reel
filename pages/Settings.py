@@ -14,7 +14,12 @@ st.caption("Add API keys for this browser session, or keep using `.streamlit/sec
 st.subheader("API Keys")
 rows = secret_status(st)
 for row in rows:
-    label = "Configured" if row["configured"] else "Missing"
+    if row["status"] == "configured":
+        label = "Configured"
+    elif row["status"] == "missing-required":
+        label = "Missing"
+    else:
+        label = "Not in use"
     st.write(f"**{row['label']}** · {label} · {row['source']}")
     st.caption(row["purpose"])
 
@@ -24,12 +29,13 @@ with st.form("runtime_keys_form"):
     for name, spec in REQUIRED_SECRETS.items():
         current = get_secret(name, st)
         placeholder = "Already configured" if current else name
+        requirement = "Required" if spec.required else "Optional"
         values[name] = st.text_input(
             spec.label,
             value="",
             placeholder=placeholder,
             type="password",
-            help=f"Used for {spec.purpose}. Stored only in Streamlit session state.",
+            help=f"{requirement}. Used for {spec.purpose}. Stored only in Streamlit session state.",
         )
 
     save_clicked = st.form_submit_button("Use Keys For This Session", type="primary")

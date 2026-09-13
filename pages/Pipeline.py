@@ -156,8 +156,7 @@ if is_busy:
     st.warning(f"Pipeline busy for client `{lock['client_id']}`.")
     _render_busy_lock(lock)
 
-configured = {row["name"]: row["configured"] for row in secret_status(st)}
-missing = [name for name, ok in configured.items() if not ok]
+missing = [row["name"] for row in secret_status(st) if row["status"] == "missing-required"]
 if missing:
     st.info(
         "Some stages need configuration before they can run: "

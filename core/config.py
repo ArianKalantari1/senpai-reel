@@ -13,6 +13,7 @@ class RequiredSecret:
     name: str
     label: str
     purpose: str
+    required: bool = True
 
 
 REQUIRED_SECRETS = {
@@ -30,6 +31,7 @@ REQUIRED_SECRETS = {
         "ASSEMBLYAI_API_KEY",
         "AssemblyAI API key",
         "transcribing downloaded audio with AssemblyAI",
+        required=False,
     ),
     "OPENAI_API_KEY": RequiredSecret(
         "OPENAI_API_KEY",
@@ -73,18 +75,25 @@ def secret_status(st_module=None) -> list[dict]:
     rows = []
     for name, spec in REQUIRED_SECRETS.items():
         configured = has_secret(name, st_module)
-        source = "Not configured"
+        status = "configured"
+        source = "Secrets or environment"
         if configured and st_module is not None and st_module.session_state.get(session_secret_key(name), ""):
             source = "Current session"
-        elif configured:
-            source = "Secrets or environment"
+        elif not configured and spec.required:
+            status = "missing-required"
+            source = "Missing required key"
+        elif not configured:
+            status = "not-in-use"
+            source = "Optional provider not configured"
 
         rows.append(
             {
                 "name": name,
                 "label": spec.label,
                 "purpose": spec.purpose,
+                "required": spec.required,
                 "configured": configured,
+                "status": status,
                 "source": source,
             }
         )
