@@ -22,7 +22,7 @@ from datetime import datetime
 import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
-from core.secrets import get_secret
+from core.config import get_secret
 from processing.concurrency import run_db_write
 from processing.media_archive import archive_video_if_ready
 

@@ -84,3 +84,54 @@ class TestUpdatePath:
         db.upsert_post(account, {"shortCode": "k", "likesCount": 1, "videoViewCount": 100}, "c1")
         db.upsert_post(account, {"shortCode": "k", "likesCount": 2}, "c1")
         assert _get(db, "k")[1] is None, "a later payload lacking views reports unknown, not zero"
+
+
+class TestHelpersAreReusableOutsideIngestion:
+    """The guards above only protect callers that go through `upsert_post`.
+
+    Anything reading `raw_scrapes` JSON directly — the Data Viewer page does —
+    re-derives these numbers itself and gets none of that protection. The
+    helpers are public so those callers can reuse them instead of writing
+    `or 0` again, which is how this bug arrived the first three times.
+    """
+
+    def test_helpers_are_public(self):
+        from core.db import opt_number, engagement_rate_of
+        assert callable(opt_number)
+        assert callable(engagement_rate_of)
+
+    def test_absent_stays_none(self):
+        from core.db import opt_number
+        assert opt_number(None, int) is None
+
+    def test_genuine_zero_survives(self):
+        from core.db import opt_number
+        assert opt_number(0, int) == 0
+
+    def test_unparseable_is_unknown_not_zero(self):
+        from core.db import opt_number
+        assert opt_number("not a number", int) is None
+        assert opt_number([], float) is None
+
+    def test_numeric_strings_still_parse(self):
+        from core.db import opt_number
+        assert opt_number("42", int) == 42
+        assert opt_number("1.5", float) == 1.5
+
+    @pytest.mark.parametrize(
+        "likes, views",
+        [(None, 100), (10, None), (None, None), (10, 0)],
+    )
+    def test_engagement_is_none_when_it_cannot_be_known(self, likes, views):
+        from core.db import engagement_rate_of
+        assert engagement_rate_of(likes, views) is None
+
+    def test_zero_likes_with_known_views_is_a_real_zero(self):
+        from core.db import engagement_rate_of
+        # This is the case the `or 0` bug destroys in the other direction:
+        # nobody engaged is a fact, and it must not read as unknown.
+        assert engagement_rate_of(0, 100) == 0.0
+
+    def test_engagement_is_computed_when_both_known(self):
+        from core.db import engagement_rate_of
+        assert engagement_rate_of(25, 100) == 25.0
