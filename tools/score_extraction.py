@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
-"""Score extracted claims against the source text they came from.
+"""Score a unit's `claim` against the `text` snippet it was abstracted from.
+
+WHAT IS ACTUALLY COMPARED, because it is easy to assume otherwise: both sides
+are the extractor's own output. `text` is the near-verbatim snippet the model
+pulled from the transcript; `claim` is the model's one-sentence restatement of
+it. This tool does NOT read the transcript, so COPIED here means "the claim
+restates its own snippet", not "the unit was lifted from the source video".
+The transcript is reachable (`transcripts.transcript`, joined on `post_id`) and
+comparing against it would be the stronger check — see KNOWN GAPS below.
 
 Every check here is mechanical — no API key, no spend, no LLM judging an LLM.
 That is a deliberate limit, not an oversight: these signals catch structural
 failures (copying, inversion, invented content, filler) and cannot judge whether
 a claim is *true*. Only a reader can do that, which is what `blind` is for.
+
+KNOWN GAPS:
+  - does not compare against the transcript (see above)
+  - the agreement figure from `compare` is only as good as the sample you mark
 
     score_extraction.py score <db>              measure the corpus
     score_extraction.py blind <db> [n] [out]    write n units for human marking
@@ -187,17 +199,25 @@ def cmd_compare(marked: str):
     misses = []
     for uid, human, claim, text in rows:
         flags = set(score_pair(claim, text)["flags"])
-        # COPIED and VAGUE proved reliable on the hand-judged set. NOVEL_CONTENT
-        # and NEGATION_MISMATCH proved advisory only, so a "good" unit is not
-        # counted as a disagreement merely for raising one of those.
+        # COPIED, PARAPHRASE and VAGUE proved reliable on the hand-judged set.
+        # NOVEL_CONTENT and NEGATION_MISMATCH proved advisory only, so a "good"
+        # unit is not counted as a disagreement merely for raising one of those.
         reliable = flags & {"COPIED", "PARAPHRASE", "VAGUE"}
         advisory = flags & {"NOVEL_CONTENT", "NEGATION_MISMATCH"}
         if human == "good":
             machine_ok = not reliable
         elif human == "lazy":
+            # "lazy" means accurate but merely restated — which is exactly what
+            # the reliable flags detect.
             machine_ok = bool(reliable)
         else:  # wrong
-            machine_ok = bool(advisory or reliable)
+            # Only the advisory flags point at "contradicts / invents / misreads".
+            # COPIED and PARAPHRASE mean the opposite — the claim stuck close to
+            # its source — so counting them as agreement here would let the tool
+            # score a hit for saying something the human did not say. That is how
+            # a calibration number flatters itself, and this tool is worthless if
+            # its own honesty check is lenient in its own favour.
+            machine_ok = bool(advisory)
         if machine_ok:
             agree += 1
         else:
