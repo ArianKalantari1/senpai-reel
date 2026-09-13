@@ -101,3 +101,17 @@ def validate_unit_role(value: str) -> Optional[str]:
 def unit_roles_for_prompt() -> str:
     """Formatted role list for model prompts."""
     return "\n".join(f"  - {r}: {UNIT_ROLE_DESCRIPTIONS[r]}" for r in UNIT_ROLES)
+
+
+# ── Generation policy ─────────────────────────────────────────────────────────
+# Roles that must never be handed to generation as source material. A competitor's
+# hook or CTA is valuable as a *pattern* to study; its wording is theirs, and
+# putting it in front of a generator as though it were an idea is how borrowed
+# phrasing ends up in a client's post.
+#
+# Stated as an exclusion, not as `unit_role = 'subject'`, and that choice matters:
+# every existing row is currently NULL. Requiring "subject" would return nothing
+# at all until the backfill has run, starving generation of every reference it
+# has. Excluding the known-bad roles instead means NULL still passes through, and
+# the filter tightens on its own as classification lands.
+ROLES_EXCLUDED_FROM_GENERATION = ("technique", "meta", "offtopic")

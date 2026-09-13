@@ -218,6 +218,44 @@ class TestSearchFilter:
         assert unclassified == {"u3"}, "seeing what has NOT been reviewed is the point"
 
 
+class TestGenerationExclusion:
+    """Technique must not reach generation as source material — but NULL must.
+
+    The whole point of the exclusion being stated as "not these roles" rather
+    than "only subject" is that every row is currently unclassified. Requiring
+    `subject` would hand generation nothing at all.
+    """
+
+    def test_technique_and_meta_are_withheld_but_unclassified_is_not(self, db):
+        from analysis.search import keyword_search
+        from analysis.unit_role import ROLES_EXCLUDED_FROM_GENERATION
+        _seed(db, [
+            ("u1", "c1", "resume keyword matching matters", "tip", "subject", "rule"),
+            ("u2", "c1", "resume keyword matching matters", "cta", "technique", "rule"),
+            ("u3", "c1", "resume keyword matching matters", "tip", "meta", "rule"),
+            ("u4", "c1", "resume keyword matching matters", "tip", None, None),
+        ])
+        got = {r.unit_id for r in keyword_search(
+            "resume", "c1", top_k=50, exclude_roles=ROLES_EXCLUDED_FROM_GENERATION)}
+        assert "u2" not in got, "a competitor's CTA is not an idea"
+        assert "u3" not in got, "a sponsor read is not an idea"
+        assert "u1" in got
+        assert "u4" in got, "unclassified is unproven, not disqualified"
+
+    def test_without_the_exclusion_nothing_is_withheld(self, db):
+        from analysis.search import keyword_search
+        _seed(db, [("u1", "c1", "resume tips here", "cta", "technique", "rule")])
+        assert {r.unit_id for r in keyword_search("resume", "c1", top_k=50)} == {"u1"}
+
+    def test_an_all_null_corpus_still_returns_references(self, db):
+        # The state the database is actually in today. If this returns nothing,
+        # Content Studio has no reference material at all.
+        from analysis.search import keyword_search
+        from analysis.unit_role import ROLES_EXCLUDED_FROM_GENERATION
+        _seed(db, [(f"u{i}", "c1", "resume advice", "tip", None, None) for i in range(5)])
+        got = keyword_search("resume", "c1", top_k=50,
+                             exclude_roles=ROLES_EXCLUDED_FROM_GENERATION)
+        assert len(got) == 5
 class TestPreMigrationDatabase:
     """The case CI never exercised: a database that predates the columns.
 
