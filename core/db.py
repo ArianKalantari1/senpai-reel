@@ -404,6 +404,18 @@ def init_db():
 
     _add_column_if_missing(conn, "message_units", "embedding_cost_usd", "DOUBLE")
 
+    # ── Unit role (creative-director-ai #27) ──────────────────────────────────
+    # A second axis beside content_type: is this an idea about the world, or a
+    # delivery technique, or channel chatter? See analysis/unit_role.py.
+    #
+    # NULL means "not classified yet" and must stay NULL. Defaulting to
+    # "subject" would put every unclassified row into the generation pool and
+    # destroy the ability to tell what was actually reviewed — absent is not
+    # zero, and it is not "subject" either.
+    _add_column_if_missing(conn, "message_units", "unit_role", "TEXT")
+    _add_column_if_missing(conn, "message_units", "unit_role_source", "TEXT")
+    _add_column_if_missing(conn, "message_units", "unit_role_confidence", "DOUBLE")
+
 
     # ── Per-persona taxonomy (creative-director-ai #25) ───────────────────────
     # Topics are per-client and versioned. Versioning is the reversibility

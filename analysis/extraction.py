@@ -17,6 +17,7 @@ from typing import List, Optional
 import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
+from analysis.unit_role import role_from_rules
 from analysis.taxonomy import (
     CONTENT_TYPES,
     topics_for_prompt,
@@ -71,6 +72,10 @@ class MessageUnit:
     confidence: float
     topic_id: Optional[str] = None
     taxonomy_id: Optional[str] = None
+    # None means "not classified yet" — never default to "subject". See #27.
+    unit_role: Optional[str] = None
+    unit_role_source: Optional[str] = None
+    unit_role_confidence: Optional[float] = None
     source_start: Optional[float] = None
     source_end: Optional[float] = None
     extracted_at: Optional[datetime] = None
@@ -150,6 +155,14 @@ def extract_message_units(
     for ru in raw_units:
         try:
             _topic_id, _topic_name = validate_topic(client_id, ru.get("topic", ""))
+            _content_type = validate_content_type(ru.get("content_type", "other"))
+            # Rules first. What they cannot decide stays NULL for the backfill
+            # tool to classify, rather than being guessed at here.
+            _role = role_from_rules(
+                text=str(ru.get("text", "")),
+                claim=str(ru.get("claim", "")),
+                content_type=_content_type,
+            )
             unit = MessageUnit(
                 unit_id=str(uuid.uuid4()),
                 post_id=post_id,
@@ -159,8 +172,10 @@ def extract_message_units(
                 topic=_topic_name,
                 topic_id=_topic_id,
                 subtopic=ru.get("subtopic") or None,
-                content_type=validate_content_type(ru.get("content_type", "other")),
+                content_type=_content_type,
                 confidence=float(ru.get("confidence", 0.5)),
+                unit_role=_role,
+                unit_role_source="rule" if _role else None,
                 extracted_at=now,
                 model=model,
             )
@@ -188,8 +203,9 @@ def save_message_units(units: List[MessageUnit], client_id: str = DEFAULT_CLIENT
             """
             INSERT INTO message_units (
                 unit_id, client_id, post_id, text, claim, advice, topic, topic_id,
-                taxonomy_id, subtopic, content_type, confidence, extracted_at, model
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                taxonomy_id, subtopic, content_type, confidence, extracted_at, model,
+                unit_role, unit_role_source, unit_role_confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (unit_id) DO NOTHING
             """,
             [
@@ -205,6 +221,9 @@ def save_message_units(units: List[MessageUnit], client_id: str = DEFAULT_CLIENT
                     getattr(u, "taxonomy_id", None) or _taxonomy_id,
                     u.subtopic,
                     u.content_type, u.confidence, u.extracted_at, u.model,
+                    getattr(u, "unit_role", None),
+                    getattr(u, "unit_role_source", None),
+                    getattr(u, "unit_role_confidence", None),
                 )
                 for u in units
             ],

@@ -4,6 +4,7 @@ st.set_page_config(page_title="Search", page_icon="🔍", layout="wide")
 st.title("Search")
 
 from analysis.taxonomy import CONTENT_TYPES
+from analysis.unit_role import UNIT_ROLES
 from core.taxonomy import topic_names
 from analysis.search import semantic_search, keyword_search
 from core.client_context import render_client_selector
@@ -75,7 +76,7 @@ def _render_embedding_sidebar(openai_key: str, total_units: int, embedded_units:
 
 def _render_search(openai_key: str, total_units: int, embedded_units: int):
     st.markdown("---")
-    col_q, col_topic, col_ct, col_k = st.columns([3, 1, 1, 1])
+    col_q, col_topic, col_ct, col_role, col_k = st.columns([3, 1, 1, 1, 1])
 
     with col_q:
         query = st.text_input("Search query", placeholder="e.g., how to pass ATS screening")
@@ -85,6 +86,9 @@ def _render_search(openai_key: str, total_units: int, embedded_units: int):
 
     with col_ct:
         ct_filter = st.selectbox("Content type", ["All"] + CONTENT_TYPES)
+
+    with col_role:
+        role_filter = st.selectbox("Role", ["All"] + UNIT_ROLES + ["Unclassified"])
 
     with col_k:
         top_k = st.number_input("Results", min_value=5, max_value=100, value=20)
@@ -98,9 +102,11 @@ def _render_search(openai_key: str, total_units: int, embedded_units: int):
     if query.strip():
         with st.spinner("Searching…"):
             if search_mode == "semantic":
-                results = semantic_search(query, openai_key, client_id, topic_filter, ct_filter, top_k)
+                results = semantic_search(query, openai_key, client_id, topic_filter,
+                                          ct_filter, top_k, role_filter)
             else:
-                results = keyword_search(query, client_id, topic_filter, top_k, ct_filter)
+                results = keyword_search(query, client_id, topic_filter, top_k, ct_filter,
+                                         role_filter)
 
         if not results:
             st.info("No results found. Try a different query or remove filters.")
