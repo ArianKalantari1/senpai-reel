@@ -250,3 +250,56 @@ def test_compare_can_use_full_transcript_from_db(tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert "Agreement with your reading: 1/1" in out
+
+
+class TestCompareWarnsWhenTranscriptIsDegraded:
+    """Omitting the db path scores LIFTED against a truncated excerpt.
+
+    transcript_excerpt() anchors on the earliest matching claim word, so a
+    phrase lifted from later in the transcript falls outside the window and
+    LIFTED does not fire. Demonstrated: the same row scores 100% agreement with
+    the database and 0% without it, and the tool attributes the gap to its own
+    unreliability. Silence there is a wrong number with a verdict attached.
+    """
+
+    def _marked_file(self, tmp_path):
+        import importlib.util, pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("se", root / "tools" / "score_extraction.py")
+        se = importlib.util.module_from_spec(spec); spec.loader.exec_module(se)
+
+        lifted = "quantified measurable achievements outperform generic responsibility statements"
+        claim = f"recruiters prefer {lifted}"
+        text = "some unrelated snippet"
+        transcript = ("recruiters are busy people. "
+                      + " ".join(["padding filler words about nothing in particular here"] * 60)
+                      + f" {lifted}")
+        excerpt = se.transcript_excerpt(transcript, claim, text)
+        assert lifted[:30] not in excerpt, "fixture must actually truncate the lifted phrase"
+
+        path = tmp_path / "marked.tsv"
+        path.write_text(
+            "unit_id\tVERDICT\tclaim\tsource\ttranscript_excerpt\n"
+            f"u1\tlazy\t{se.tsv_cell(claim)}\t{se.tsv_cell(text)}\t{se.tsv_cell(excerpt)}\n",
+            encoding="utf-8")
+        return str(path)
+
+    def _run(self, *args):
+        import subprocess, sys, pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        return subprocess.run(
+            [sys.executable, str(root / "tools" / "score_extraction.py"), "compare", *args],
+            capture_output=True, text=True, cwd=str(root))
+
+    def test_warns_when_no_database_is_given(self, tmp_path):
+        out = self._run(self._marked_file(tmp_path)).stdout
+        assert "WARNING" in out
+        assert "not trustworthy" in out
+        assert "compare <marked.tsv> <db>" in out
+
+    def test_the_warning_names_the_actual_risk(self, tmp_path):
+        out = self._run(self._marked_file(tmp_path)).stdout
+        # Naming LIFTED matters: a generic "results may vary" would not tell the
+        # reader which signal to distrust.
+        assert "LIFTED" in out
+        assert "truncated excerpt" in out

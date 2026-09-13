@@ -322,6 +322,17 @@ def cmd_compare(marked: str, db_path: str | None = None):
         raise SystemExit("No marked rows found. Fill in the VERDICT column with good/wrong/lazy.")
 
     transcript_by_unit = load_transcripts_by_unit(db_path, [r[0] for r in rows]) if db_path else {}
+    if not db_path and any(r[4] for r in rows):
+        # Without the database, the only transcript available is the truncated
+        # excerpt in the TSV. transcript_excerpt() anchors its window on the
+        # EARLIEST matching claim word, so a phrase lifted from later in the
+        # transcript falls outside it and LIFTED silently does not fire. The
+        # agreement number then comes out lower and the tool blames itself —
+        # a wrong number delivered with a confident verdict attached.
+        print("\n  WARNING: no database path given, so LIFTED is being scored against the")
+        print("  truncated excerpt in the file, not the full transcript. It will be")
+        print("  under-reported and the agreement figure below is not trustworthy.")
+        print(f"  Re-run as: score_extraction.py compare <marked.tsv> <db>\n")
     agree = disagree = 0
     misses = []
     for uid, human, claim, text, transcript in rows:
