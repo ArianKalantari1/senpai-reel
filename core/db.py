@@ -754,7 +754,7 @@ def _link_post_to_client(conn, client_id: str, post_id: str):
     )
 
 
-def _opt_number(value, cast):
+def opt_number(value, cast):
     """Cast to a number, preserving None.
 
     Deliberately not `cast(value or 0)`: an absent count and a real zero are
@@ -769,7 +769,7 @@ def _opt_number(value, cast):
         return None
 
 
-def _engagement_rate(likes, views):
+def engagement_rate_of(likes, views):
     """Likes as a percentage of views, or None when that cannot be known.
 
     Returns None if either input is missing. Previously this returned 0.0,
@@ -798,11 +798,11 @@ def upsert_post(account_id: str, item: dict, client_id: str = DEFAULT_CLIENT_ID)
     # `or 0` here would make "the source did not supply this" and "this is
     # genuinely zero" indistinguishable, which silently corrupts engagement
     # maths. Missing stays NULL. See creative-director-ai #21.
-    likes = _opt_number(item.get("likesCount"), int)
-    views = _opt_number(item.get("videoViewCount"), int)
-    comments_count = _opt_number(item.get("commentsCount"), int)
-    duration_sec = _opt_number(item.get("videoDuration"), float)
-    engagement_rate = _engagement_rate(likes, views)
+    likes = opt_number(item.get("likesCount"), int)
+    views = opt_number(item.get("videoViewCount"), int)
+    comments_count = opt_number(item.get("commentsCount"), int)
+    duration_sec = opt_number(item.get("videoDuration"), float)
+    engagement_rate = engagement_rate_of(likes, views)
     now = datetime.utcnow()
 
     thumbnail = None

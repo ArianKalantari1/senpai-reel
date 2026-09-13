@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 
 from core.client_context import render_client_selector
-from core.db import get_connection, init_db
+from core.db import get_connection, init_db, opt_number, engagement_rate_of
 from core.navigation import render_page_link
 
 st.set_page_config(page_title="Data Viewer", page_icon="📊", layout="wide")
@@ -152,18 +152,22 @@ def load_raw_fallback(account_filter, page):
     for _, row in df.iterrows():
         try:
             r = json.loads(row["raw"])
-            likes = r.get("likesCount") or 0
-            views = r.get("videoViewCount") or 0
+            # This page reads raw_scrapes JSON directly, so it gets none of the
+            # protection upsert_post applies at ingestion. Use the same helpers
+            # rather than re-deriving the numbers: a missing count rendered as 0
+            # is a confident figure the system cannot vouch for.
+            likes = opt_number(r.get("likesCount"), int)
+            views = opt_number(r.get("videoViewCount"), int)
             rows.append({
                 "post_id": r.get("shortCode", ""),
                 "account_id": row["profile"],
                 "caption": str(r.get("caption", "") or "")[:120],
                 "likes": likes,
                 "views": views,
-                "comments_count": r.get("commentsCount") or 0,
-                "duration_sec": r.get("videoDuration") or 0,
+                "comments_count": opt_number(r.get("commentsCount"), int),
+                "duration_sec": opt_number(r.get("videoDuration"), float),
                 "posted_at": r.get("timestamp", "")[:10],
-                "engagement_rate": round(likes / views * 100, 2) if views > 0 else 0,
+                "engagement_rate": engagement_rate_of(likes, views),
                 "video_url": r.get("videoUrl", ""),
                 "download_status": "pending",
             })
