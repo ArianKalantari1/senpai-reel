@@ -15,6 +15,7 @@ from typing import List, Optional
 import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
+from analysis.unit_role import ROLES_EXCLUDED_FROM_GENERATION
 from analysis.originality import (
     ReferenceLeakError,
     find_overlap,
@@ -67,6 +68,15 @@ def _with_client_context(user_msg: str, client_context: Optional[dict]) -> str:
     if not lines:
         return user_msg
     return f"{user_msg}\n\nClient context:\n" + "\n".join(lines)
+
+
+def _reference_units_for_generation(reference_units: list) -> list:
+    """Filter units that are research evidence, not generation source material."""
+    return [
+        unit for unit in reference_units
+        if (getattr(unit, "unit_role", None) or "").strip().lower()
+        not in ROLES_EXCLUDED_FROM_GENERATION
+    ]
 
 
 def _call_gpt(
@@ -156,6 +166,7 @@ def generate_caption(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
 ) -> GeneratedContent:
+    reference_units = _reference_units_for_generation(reference_units)
     context = format_reference_context(reference_units)
     user_msg = CAPTION_USER.format(topic=topic, tone=tone, angle=angle, reference_context=context)
     user_msg = _with_client_context(user_msg, client_context)
@@ -187,6 +198,7 @@ def generate_hooks(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
 ) -> GeneratedContent:
+    reference_units = _reference_units_for_generation(reference_units)
     system = HOOKS_SYSTEM.format(count=count)
     context = format_reference_context(reference_units)
     user_msg = HOOKS_USER.format(topic=topic, angle=angle, reference_context=context, count=count)
@@ -219,6 +231,7 @@ def generate_script(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
 ) -> GeneratedContent:
+    reference_units = _reference_units_for_generation(reference_units)
     word_count = int(duration_sec / 60 * 130)
     system = SCRIPT_SYSTEM.format(duration_sec=duration_sec, word_count=word_count, tone=tone)
     context = format_reference_context(reference_units)
