@@ -409,3 +409,131 @@ class TestSemanticLaziness:
         # Keeping the raw figure visible means the effect of stemming stays
         # auditable instead of being folded invisibly into one number.
         assert r["overlap"] >= r["raw_overlap"]
+
+
+class TestParaphraseThresholdFlag:
+    """The threshold is only retunable 'without a code change' if it can be
+    reached from a terminal. A keyword argument on score_pair() cannot be:
+    the CLI takes its arguments positionally, so the flag has to be lifted out
+    of argv before dispatch or it shifts <db> into the next slot and the
+    failure surfaces as a bad database path.
+    """
+
+    def _se(self):
+        import importlib.util, pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("se", root / "tools" / "score_extraction.py")
+        m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+        return m
+
+    def test_absent_flag_leaves_argv_untouched(self):
+        se = self._se()
+        assert se.take_threshold(["score", "reels.duckdb"]) == (["score", "reels.duckdb"], None)
+
+    def test_flag_is_removed_so_positionals_keep_their_slots(self):
+        se = self._se()
+        rest, value = se.take_threshold(
+            ["compare", "marked.tsv", "reels.duckdb", "--paraphrase-threshold", "0.25"]
+        )
+        assert rest == ["compare", "marked.tsv", "reels.duckdb"]
+        assert value == 0.25
+
+    def test_flag_may_appear_before_the_subcommand(self):
+        se = self._se()
+        rest, value = se.take_threshold(["--paraphrase-threshold=0.5", "score", "reels.duckdb"])
+        assert rest == ["score", "reels.duckdb"]
+        assert value == 0.5
+
+    @pytest.mark.parametrize("argv", [
+        ["score", "db", "--paraphrase-threshold", "abc"],
+        ["score", "db", "--paraphrase-threshold", "0"],
+        ["score", "db", "--paraphrase-threshold", "1.5"],
+        ["score", "db", "--paraphrase-threshold", "-0.2"],
+        ["score", "db", "--paraphrase-threshold"],
+    ])
+    def test_unusable_values_are_refused_not_absorbed(self, argv):
+        se = self._se()
+        # A measuring tool that silently accepts a nonsense threshold reports a
+        # number that looks fine and means nothing. Fail at the boundary.
+        with pytest.raises(SystemExit):
+            se.take_threshold(argv)
+
+    def test_one_point_zero_is_allowed(self):
+        se = self._se()
+        # Strict, but meaningful: every stemmed content word of the claim
+        # present in the source. Only 0 is useless, and only 0 is refused.
+        assert se.take_threshold(["score", "db", "--paraphrase-threshold", "1.0"])[1] == 1.0
+
+    def test_the_commands_accept_the_threshold(self):
+        se = self._se()
+        import inspect
+        # Signature only. This test alone is NOT enough — a command can take
+        # the argument and never pass it on, and this still passes. The two
+        # tests below are the ones that catch that, and they were written
+        # because a mutation that made cmd_compare ignore the threshold left
+        # this assertion green.
+        for fn in (se.cmd_score, se.cmd_compare):
+            assert "paraphrase_threshold" in inspect.signature(fn).parameters
+        # `blind` deliberately does not: it withholds every scorer opinion.
+        assert "paraphrase_threshold" not in inspect.signature(se.cmd_blind).parameters
+
+    # One real pair from the 2026-09-13 blind sample, hand-marked "lazy".
+    # Stemmed overlap 0.33 — above the shipped 0.30, so it is a live case on
+    # both sides of the threshold rather than a constructed one.
+    _LAZY_CLAIM = "Cracks in life come from living fully, not from failure."
+    _LAZY_SOURCE = ("Careers crack, confidence cracks, relationship crack. "
+                    "Not because you failed, but because you lived.")
+
+    def _db_with_the_lazy_pair(self, tmp_path):
+        db_path = _make_score_db(tmp_path)
+        conn = duckdb.connect(db_path)
+        conn.execute(
+            "INSERT INTO message_units VALUES (?, ?, ?, ?, ?)",
+            ["u1", "p1", self._LAZY_CLAIM, self._LAZY_SOURCE, "career"],
+        )
+        conn.close()
+        return db_path
+
+    @staticmethod
+    def _flags_tallied(out: str) -> set[str]:
+        """Flag names from the tally block only.
+
+        Not a substring search on the whole report: it closes with a legend
+        naming every flag, so `"PARAPHRASE" in out` is true whatever the
+        threshold does. That false-negative-proof version of this test passed
+        against a threshold that was never applied.
+        """
+        flags = set()
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isupper() and parts[1].rstrip(",").isdigit():
+                flags.add(parts[0])
+        return flags
+
+    def test_score_actually_uses_the_threshold(self, tmp_path, capsys):
+        se = self._se()
+        db_path = self._db_with_the_lazy_pair(tmp_path)
+
+        se.cmd_score(db_path, 0.10)
+        assert "PARAPHRASE" in self._flags_tallied(capsys.readouterr().out)
+
+        se.cmd_score(db_path, 0.95)
+        assert "PARAPHRASE" not in self._flags_tallied(capsys.readouterr().out)
+
+    def test_compare_actually_uses_the_threshold(self, tmp_path, capsys):
+        se = self._se()
+        marked = tmp_path / "marked.tsv"
+        marked.write_text(
+            "unit_id\tVERDICT\tclaim\tsource\n"
+            f"u1\tlazy\t{self._LAZY_CLAIM}\t{self._LAZY_SOURCE}\n",
+            encoding="utf-8",
+        )
+
+        # Human said "lazy". A permissive threshold makes the tool agree; a
+        # strict one makes it disagree. If the threshold never reaches
+        # score_pair, both runs report the same figure.
+        se.cmd_compare(str(marked), None, 0.10)
+        assert "1/1" in capsys.readouterr().out
+
+        se.cmd_compare(str(marked), None, 0.95)
+        assert "0/1" in capsys.readouterr().out
