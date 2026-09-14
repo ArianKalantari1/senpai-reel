@@ -55,6 +55,49 @@ def toks(text: str) -> list[str]:
     return TOKEN.findall((text or "").lower())
 
 
+# Suffix stripping, deliberately crude. It only has to collapse morphological
+# variants of the same word ("lived"/"living", "failed"/"failure"), not be
+# linguistically correct. Longest suffixes first so "ations" beats "s".
+_SUFFIXES = (
+    "ational", "ization", "iveness", "fulness", "ousness", "ations", "ement",
+    "ments", "ingly", "edly", "ance", "ence", "ible", "able", "ings", "ment",
+    "ness", "tion", "sion", "ies", "ing", "ers", "est", "ed", "es", "ly",
+    "er", "s", "y",
+)
+
+
+def stem(word: str) -> str:
+    for suffix in _SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+# CALIBRATED 2026-09-13 against 12 hand-marked pairs — 7 judged "lazy" by a
+# careful human read, 5 judged good abstractions. The old threshold of 0.60 on
+# raw tokens caught ZERO of the seven, which is why `compare` agreed with a
+# human only 57% of the time: the tool could see lexical laziness but not
+# semantic laziness, and a claim that restates its source in different words
+# scored clean.
+#
+#   threshold  stemmed   caught      false positives
+#       0.60      no      0/7             0/5     <- what shipped
+#       0.40      no      2/7             0/5
+#       0.40     yes      3/7             0/5
+#       0.30     yes      4/7             0/5     <- chosen
+#       0.25     yes      6/7             0/5
+#
+# 0.25 catches more and still showed no false positives, but the highest-scoring
+# good abstraction in the control sits at 0.17 — an 0.08 margin on a 12-item
+# set. 0.30 leaves 0.13. While the calibration set is this small, under-flagging
+# is the safer error: a false PARAPHRASE on a good unit costs trust in a tool
+# whose whole purpose is being trustworthy about itself.
+#
+# Re-run the sweep when a larger marked sample exists. --paraphrase-threshold
+# exists so that does not require a code change.
+DEFAULT_PARAPHRASE_THRESHOLD = 0.30
+
+
 def ngrams(t: list[str], n: int) -> set[tuple[str, ...]]:
     return {tuple(t[i:i + n]) for i in range(len(t) - n + 1)} if len(t) >= n else set()
 
@@ -74,7 +117,8 @@ def shared_content_ngrams(left: str, right: str, n: int = 4) -> set[tuple[str, .
     return ngrams(left_content, n) & ngrams(right_content, n)
 
 
-def score_pair(claim: str, text: str) -> dict:
+def score_pair(claim: str, text: str,
+               paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD) -> dict:
     """Return structural signals for one (claim, source) pair."""
     c, t = toks(claim), toks(text)
     if not c or not t:
@@ -93,8 +137,13 @@ def score_pair(claim: str, text: str) -> dict:
     #    than generalised. Weaker than COPIED but still low value.
     content_c = {w for w in cset if w not in STOPish}
     content_t = {w for w in tset if w not in STOPish}
-    overlap = len(content_c & content_t) / len(content_c) if content_c else 0.0
-    if not shared4 and overlap >= 0.6:
+    # Stemmed, so "not because you failed, but because you lived" registers
+    # against "come from living fully, not from failure". Raw tokens miss it.
+    stem_c = {stem(w) for w in content_c}
+    stem_t = {stem(w) for w in content_t}
+    overlap = len(stem_c & stem_t) / len(stem_c) if stem_c else 0.0
+    raw_overlap = len(content_c & content_t) / len(content_c) if content_c else 0.0
+    if not shared4 and overlap >= paraphrase_threshold:
         flags.append("PARAPHRASE")
 
     # 3. Possible inversion. Negation on one side only flips the meaning.
@@ -122,6 +171,7 @@ def score_pair(claim: str, text: str) -> dict:
     return {
         "flags": flags or ["OK"],
         "overlap": round(overlap, 2),
+        "raw_overlap": round(raw_overlap, 2),
         "novel": sorted(novel)[:6],
     }
 

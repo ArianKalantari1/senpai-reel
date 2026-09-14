@@ -303,3 +303,109 @@ class TestCompareWarnsWhenTranscriptIsDegraded:
         # reader which signal to distrust.
         assert "LIFTED" in out
         assert "truncated excerpt" in out
+
+
+class TestSemanticLaziness:
+    """A claim that restates its source IN DIFFERENT WORDS used to score clean.
+
+    That was the single biggest reason `compare` agreed with a careful human
+    read only 57% of the time on 2026-09-13: seven of the fifteen disagreements
+    were units a human called "lazy" and the tool called OK.
+
+    The old PARAPHRASE check needed 0.60 raw-token overlap. Restating something
+    in your own words shares almost no raw tokens, so it never fired.
+    """
+
+    def _se(self):
+        import importlib.util, pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("se", root / "tools" / "score_extraction.py")
+        m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+        return m
+
+    # Real pairs from the 2026-09-13 blind sample, marked "lazy" by hand.
+    LAZY = [
+        ("Cracks in life come from living fully, not from failure.",
+         "Careers crack, confidence cracks, relationship crack. Not because you "
+         "failed, but because you lived."),
+        ("Taking action is the most important step in building high agency.",
+         "The number one thing you can do to practice high agency is develop a "
+         "bias for action."),
+        ("A simple method can save job seekers significant money on resume-boosting certificates.",
+         "I'm going to save you thousands of dollars on certificates for your "
+         "resume using this one very simple hack."),
+        ("The AI agent autonomously finds job roles matching your criteria.",
+         "Now you have an AI agent that'll automatically search for the best fit "
+         "roles for you."),
+    ]
+
+    # Marked "good" by hand. These must NOT start flagging — a false
+    # PARAPHRASE costs trust in a tool whose whole job is being trustworthy.
+    GOOD = [
+        ("Unfamiliarity, not dislike, is the real barrier for AI brands.",
+         "Lack of familiarity was the most common reason for rejection."),
+        ("Corporate environments make high achievers dependent and vulnerable to systemic shocks.",
+         "Most smart, ambitious people have been fragilized by corporate systems."),
+        ("Regular confidence-building reduces the depth of confidence dips.",
+         "The more you work on your confidence, the higher you can raise your threshold."),
+        ("Automated hiring processes feel so impersonal that they seem AI-generated.",
+         "Wait, is this chatgpt?"),
+        ("Inspiration involves adapting ideas creatively, not replicating them verbatim.",
+         "Imitation is the highest form of flattery, but there's a difference "
+         "between inspiration and copying."),
+    ]
+
+    def test_stemming_collapses_inflections(self):
+        se = self._se()
+        assert se.stem("lived") == se.stem("living")
+        assert se.stem("cracks") == se.stem("crack")
+        assert se.stem("customers") == se.stem("customer")
+
+    def test_derivational_morphology_is_out_of_scope(self):
+        se = self._se()
+        # "failed" -> "fail" but "failure" stays put: verb-to-noun derivation
+        # needs "-ure" stripped, which would maul "measure" -> "meas" and
+        # "figure" -> "fig". Inflection is worth collapsing; derivation is not
+        # worth the collateral damage at this sample size.
+        assert se.stem("failed") != se.stem("failure")
+
+    def test_stemming_does_not_maul_short_words(self):
+        se = self._se()
+        # Stripping below three characters produces collisions that would
+        # quietly inflate every overlap score.
+        for w in ("is", "was", "key", "day", "buy"):
+            assert len(se.stem(w)) >= 3 or se.stem(w) == w
+
+    def test_it_now_catches_restatement_in_different_words(self):
+        se = self._se()
+        caught = sum(1 for c, t in self.LAZY
+                     if "PARAPHRASE" in se.score_pair(c, t)["flags"])
+        # Not all of them — this is an improvement, not a solution, and the
+        # docstring in the tool says so. Pinning the floor we calibrated to.
+        assert caught >= 3, f"only caught {caught}/{len(self.LAZY)}"
+
+    def test_the_old_threshold_caught_none_of_them(self):
+        se = self._se()
+        caught = sum(1 for c, t in self.LAZY
+                     if "PARAPHRASE" in se.score_pair(c, t, paraphrase_threshold=0.60)["flags"])
+        # The regression this fixes, kept executable rather than described.
+        assert caught == 0
+
+    def test_good_abstractions_stay_clean(self):
+        se = self._se()
+        for claim, text in self.GOOD:
+            flags = se.score_pair(claim, text)["flags"]
+            assert "PARAPHRASE" not in flags, f"false positive on: {claim[:60]}"
+
+    def test_threshold_is_tunable_without_a_code_change(self):
+        se = self._se()
+        claim, text = self.LAZY[0]
+        assert "PARAPHRASE" in se.score_pair(claim, text, paraphrase_threshold=0.10)["flags"]
+        assert "PARAPHRASE" not in se.score_pair(claim, text, paraphrase_threshold=0.95)["flags"]
+
+    def test_both_overlaps_are_reported(self):
+        se = self._se()
+        r = se.score_pair(*self.LAZY[0])
+        # Keeping the raw figure visible means the effect of stemming stays
+        # auditable instead of being folded invisibly into one number.
+        assert r["overlap"] >= r["raw_overlap"]
