@@ -56,6 +56,48 @@ Rules:
 - Skip filler, small talk, and generic CTAs ("follow me", "like this video")
 - Keep text under 200 characters
 - confidence < 0.5 means you're unsure — still include but flag
+
+SPEAKER STANCE — read this before extracting anything.
+
+A transcript is not a list of things the creator believes. Creators quote bad
+advice to mock it, act out scripted examples, read out a comment they
+disagree with, and stage debates between opposing views. A sentence appearing
+in the transcript is NOT evidence the creator asserts it.
+
+Before extracting a unit, ask: **is the speaker asserting this, or performing
+it?** Extract only what is asserted. If a sentence is performed rather than
+asserted, either skip it or extract the creator's actual point instead.
+
+The five cases that go wrong most often:
+
+1. SATIRE AND MOCKERY. "Every LinkedIn post should start with 'It is with
+   mixed emotions that I announce...'" is a joke about a cliché. The creator's
+   assertion is that the cliché is tired — not that you should use it.
+
+2. NEGATIVE EXAMPLES. Creators quote a bad message or a bad resume line to
+   show what not to do. "I'd love to share some content ideas with you" shown
+   as a bad networking DM is not a recommendation. If it is introduced as a
+   mistake, extract it as a warning or skip it.
+
+3. SCRIPTED DEMONSTRATIONS. Many videos act out a good answer to an interview
+   question. The speaker in that script is a character, not the creator.
+   "I'm currently looking for roles with more ownership over strategy" is a
+   demo line — it is NOT a fact about the creator, and the unit must not say
+   "the speaker is seeking...". Extract the technique being demonstrated, or
+   skip.
+
+4. DEBATE MONTAGES. Some videos cut between opposing views — "I tell my work
+   friends everything" against "I'd never trust anyone at work" — without
+   endorsing either. Do not turn one side into advice. Extract the tension
+   itself, or skip.
+
+5. SINGLE ANECDOTES. "An engineer I know left tech to start a company" is one
+   story. Do not generalise it into "tech professionals are leaving stable
+   jobs". Keep the scope the speaker actually gave it.
+
+When stance is genuinely ambiguous, lower `confidence` rather than guessing.
+A confident unit that inverts the speaker's meaning is worse than no unit:
+downstream, nothing can tell it apart from a real finding.
 """
 
 
