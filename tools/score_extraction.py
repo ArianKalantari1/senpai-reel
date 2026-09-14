@@ -18,6 +18,10 @@ KNOWN GAPS:
     score_extraction.py score <db>              measure the corpus
     score_extraction.py blind <db> [n] [out]    write n units for human marking
     score_extraction.py compare <marked.tsv> [db]  agreement between you and it
+
+  --paraphrase-threshold <0..1> retunes the PARAPHRASE cut-off for `score` and
+  `compare` without editing code. See DEFAULT_PARAPHRASE_THRESHOLD for how the
+  shipped value was calibrated and what a larger marked sample should change.
 """
 from __future__ import annotations
 
@@ -55,6 +59,49 @@ def toks(text: str) -> list[str]:
     return TOKEN.findall((text or "").lower())
 
 
+# Suffix stripping, deliberately crude. It only has to collapse morphological
+# variants of the same word ("lived"/"living", "failed"/"failure"), not be
+# linguistically correct. Longest suffixes first so "ations" beats "s".
+_SUFFIXES = (
+    "ational", "ization", "iveness", "fulness", "ousness", "ations", "ement",
+    "ments", "ingly", "edly", "ance", "ence", "ible", "able", "ings", "ment",
+    "ness", "tion", "sion", "ies", "ing", "ers", "est", "ed", "es", "ly",
+    "er", "s", "y",
+)
+
+
+def stem(word: str) -> str:
+    for suffix in _SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+# CALIBRATED 2026-09-13 against 12 hand-marked pairs — 7 judged "lazy" by a
+# careful human read, 5 judged good abstractions. The old threshold of 0.60 on
+# raw tokens caught ZERO of the seven, which is why `compare` agreed with a
+# human only 57% of the time: the tool could see lexical laziness but not
+# semantic laziness, and a claim that restates its source in different words
+# scored clean.
+#
+#   threshold  stemmed   caught      false positives
+#       0.60      no      0/7             0/5     <- what shipped
+#       0.40      no      2/7             0/5
+#       0.40     yes      3/7             0/5
+#       0.30     yes      4/7             0/5     <- chosen
+#       0.25     yes      6/7             0/5
+#
+# 0.25 catches more and still showed no false positives, but the highest-scoring
+# good abstraction in the control sits at 0.17 — an 0.08 margin on a 12-item
+# set. 0.30 leaves 0.13. While the calibration set is this small, under-flagging
+# is the safer error: a false PARAPHRASE on a good unit costs trust in a tool
+# whose whole purpose is being trustworthy about itself.
+#
+# Re-run the sweep when a larger marked sample exists. --paraphrase-threshold
+# exists so that does not require a code change.
+DEFAULT_PARAPHRASE_THRESHOLD = 0.30
+
+
 def ngrams(t: list[str], n: int) -> set[tuple[str, ...]]:
     return {tuple(t[i:i + n]) for i in range(len(t) - n + 1)} if len(t) >= n else set()
 
@@ -74,7 +121,8 @@ def shared_content_ngrams(left: str, right: str, n: int = 4) -> set[tuple[str, .
     return ngrams(left_content, n) & ngrams(right_content, n)
 
 
-def score_pair(claim: str, text: str) -> dict:
+def score_pair(claim: str, text: str,
+               paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD) -> dict:
     """Return structural signals for one (claim, source) pair."""
     c, t = toks(claim), toks(text)
     if not c or not t:
@@ -93,8 +141,13 @@ def score_pair(claim: str, text: str) -> dict:
     #    than generalised. Weaker than COPIED but still low value.
     content_c = {w for w in cset if w not in STOPish}
     content_t = {w for w in tset if w not in STOPish}
-    overlap = len(content_c & content_t) / len(content_c) if content_c else 0.0
-    if not shared4 and overlap >= 0.6:
+    # Stemmed, so "not because you failed, but because you lived" registers
+    # against "come from living fully, not from failure". Raw tokens miss it.
+    stem_c = {stem(w) for w in content_c}
+    stem_t = {stem(w) for w in content_t}
+    overlap = len(stem_c & stem_t) / len(stem_c) if stem_c else 0.0
+    raw_overlap = len(content_c & content_t) / len(content_c) if content_c else 0.0
+    if not shared4 and overlap >= paraphrase_threshold:
         flags.append("PARAPHRASE")
 
     # 3. Possible inversion. Negation on one side only flips the meaning.
@@ -122,6 +175,7 @@ def score_pair(claim: str, text: str) -> dict:
     return {
         "flags": flags or ["OK"],
         "overlap": round(overlap, 2),
+        "raw_overlap": round(raw_overlap, 2),
         "novel": sorted(novel)[:6],
     }
 
@@ -226,12 +280,13 @@ def load_transcripts_by_unit(db_path: str, unit_ids: list[str]) -> dict[str, str
         conn.close()
 
 
-def cmd_score(db_path: str):
+def cmd_score(db_path: str,
+              paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD):
     rows = load(db_path)
     tally, transcript_tally, overlaps = Counter(), Counter(), []
     covered = text_matches_transcript = 0
     for _uid, claim, text, transcript, _topic in rows:
-        r = score_pair(claim, text)
+        r = score_pair(claim, text, paraphrase_threshold)
         for f in r["flags"]:
             tally[f] += 1
         if r["overlap"] is not None:
@@ -304,7 +359,8 @@ def cmd_blind(db_path: str, n: int, out: str):
     print(f"\nMark the VERDICT column, then: score_extraction.py compare {out} {db_path}\n")
 
 
-def cmd_compare(marked: str, db_path: str | None = None):
+def cmd_compare(marked: str, db_path: str | None = None,
+                paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD):
     rows = []
     with open(marked, encoding="utf-8") as fh:
         for line in fh:
@@ -339,7 +395,7 @@ def cmd_compare(marked: str, db_path: str | None = None):
         transcript = transcript_by_unit.get(uid, transcript)
         if transcript == "[missing transcript]":
             transcript = None
-        flags = set(score_pair(claim, text)["flags"])
+        flags = set(score_pair(claim, text, paraphrase_threshold)["flags"])
         flags |= set(score_transcript(claim, text, transcript)["flags"]) - {"OK"}
         # COPIED, PARAPHRASE and VAGUE proved reliable on the hand-judged set.
         # LIFTED joins them for "lazy", not "wrong": exact reuse of transcript
@@ -386,14 +442,69 @@ def cmd_compare(marked: str, db_path: str | None = None):
     print()
 
 
+_THRESHOLD_FLAG = "--paraphrase-threshold"
+
+
+def take_threshold(argv: list[str]) -> tuple[list[str], float | None]:
+    """Pull --paraphrase-threshold out of argv, returning the rest unchanged.
+
+    The commands take their arguments positionally, so the flag has to be
+    removed before dispatch rather than parsed alongside — otherwise passing it
+    shifts <db> into the <n> slot and the failure looks like a bad database
+    path. Accepts both "--paraphrase-threshold 0.25" and "=0.25".
+    """
+    rest: list[str] = []
+    value: str | None = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == _THRESHOLD_FLAG:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"{_THRESHOLD_FLAG} needs a value between 0 and 1.")
+            value = argv[i + 1]
+            i += 2
+            continue
+        if arg.startswith(_THRESHOLD_FLAG + "="):
+            value = arg.split("=", 1)[1]
+            i += 1
+            continue
+        rest.append(arg)
+        i += 1
+
+    if value is None:
+        return rest, None
+    try:
+        threshold = float(value)
+    except ValueError:
+        raise SystemExit(f"{_THRESHOLD_FLAG}: {value!r} is not a number.")
+    # 0 flags every unit that has no shared 4-gram, which is silently useless
+    # rather than loudly wrong — the worst way for a measuring tool to fail.
+    # 1.0 is strict but meaningful (total overlap), so it stays allowed.
+    if not 0 < threshold <= 1:
+        raise SystemExit(
+            f"{_THRESHOLD_FLAG}: {threshold} is outside 0-1. "
+            f"The calibrated default is {DEFAULT_PARAPHRASE_THRESHOLD}."
+        )
+    return rest, threshold
+
+
 if __name__ == "__main__":
-    a = sys.argv[1:]
+    a, override = take_threshold(sys.argv[1:])
+    threshold = DEFAULT_PARAPHRASE_THRESHOLD if override is None else override
     if len(a) >= 2 and a[0] == "score":
-        cmd_score(a[1])
+        cmd_score(a[1], threshold)
     elif len(a) >= 2 and a[0] == "blind":
+        if override is not None:
+            # `blind` withholds every scorer opinion on purpose. Accepting the
+            # flag here and ignoring it would let someone believe they had
+            # changed a sample they had not.
+            raise SystemExit(
+                f"{_THRESHOLD_FLAG} does not apply to `blind` — it writes units "
+                "for you to mark and never scores them. Pass it to `compare`."
+            )
         cmd_blind(a[1], int(a[2]) if len(a) > 2 else 100, a[3] if len(a) > 3 else "extraction_sample.tsv")
     elif len(a) >= 2 and a[0] == "compare":
-        cmd_compare(a[1], a[2] if len(a) > 2 else None)
+        cmd_compare(a[1], a[2] if len(a) > 2 else None, threshold)
     else:
         print(__doc__)
         sys.exit(2)
