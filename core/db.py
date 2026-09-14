@@ -360,6 +360,8 @@ def init_db():
         source_end   DOUBLE,
         extracted_at TIMESTAMP,
         model        TEXT,
+        extraction_run_id TEXT,
+        prompt_version TEXT,
         embedding    FLOAT[1536],
         embedded_at  TIMESTAMP,
         embedding_cost_usd DOUBLE
@@ -415,6 +417,13 @@ def init_db():
     _add_column_if_missing(conn, "message_units", "unit_role", "TEXT")
     _add_column_if_missing(conn, "message_units", "unit_role_source", "TEXT")
     _add_column_if_missing(conn, "message_units", "unit_role_confidence", "DOUBLE")
+
+    # ── Extraction provenance (creative-director-ai #37) ─────────────────────
+    # Re-extraction is allowed to append a sampled comparison run, never to
+    # overwrite the corpus. NULL means the unit predates this provenance and
+    # must stay NULL — do not backfill a guessed prompt/run onto legacy rows.
+    _add_column_if_missing(conn, "message_units", "extraction_run_id", "TEXT")
+    _add_column_if_missing(conn, "message_units", "prompt_version", "TEXT")
 
 
     # ── Per-persona taxonomy (creative-director-ai #25) ───────────────────────

@@ -42,6 +42,36 @@ class TestInitDb:
         _, db_mod = tmp_db
         db_mod.init_db()  # second call — must not crash
 
+    def test_message_unit_provenance_columns_are_nullable(self, tmp_db):
+        db_file, db_mod = tmp_db
+        db_mod.init_db()  # second run must not clobber or default anything
+
+        conn = duckdb.connect(db_file)
+        cols = {r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'message_units'"
+        ).fetchall()}
+        conn.execute(
+            """
+            INSERT INTO message_units (
+                unit_id, client_id, post_id, text, claim, topic, content_type
+            )
+            VALUES ('legacy_unit', ?, 'legacy_post', 'text', 'claim', 'General', 'tip')
+            """,
+            [db_mod.DEFAULT_CLIENT_ID],
+        )
+        row = conn.execute(
+            """
+            SELECT extraction_run_id, prompt_version
+            FROM message_units
+            WHERE unit_id = 'legacy_unit'
+            """
+        ).fetchone()
+        conn.close()
+
+        assert {"extraction_run_id", "prompt_version"} <= cols
+        assert row == (None, None)
+
     def test_demo_client_seeded(self, tmp_db):
         db_file, db_mod = tmp_db
         conn = duckdb.connect(db_file)
