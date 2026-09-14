@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -118,6 +119,8 @@ class MessageUnit:
     unit_role: Optional[str] = None
     unit_role_source: Optional[str] = None
     unit_role_confidence: Optional[float] = None
+    extraction_run_id: Optional[str] = None
+    prompt_version: Optional[str] = None
     source_start: Optional[float] = None
     source_end: Optional[float] = None
     extracted_at: Optional[datetime] = None
@@ -138,12 +141,23 @@ def build_system_prompt(client_id: str) -> str:
     )
 
 
+def prompt_version_for_text(system_prompt: str) -> str:
+    """Short hash of the rendered extraction prompt."""
+    digest = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:12]}"
+
+
+def prompt_version_for_client(client_id: str = DEFAULT_CLIENT_ID) -> str:
+    return prompt_version_for_text(build_system_prompt(client_id))
+
+
 def extract_message_units(
     transcript_text: str,
     post_id: str,
     openai_api_key: str,
     client_id: str = DEFAULT_CLIENT_ID,
     model: str = "gpt-4o-mini",
+    extraction_run_id: Optional[str] = None,
 ) -> tuple[List[MessageUnit], float]:
     """
     Extract message units from a transcript via GPT.
@@ -159,10 +173,13 @@ def extract_message_units(
         "Content-Type": "application/json",
     }
 
+    system_prompt = build_system_prompt(client_id)
+    prompt_version = prompt_version_for_text(system_prompt)
+
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": build_system_prompt(client_id)},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Transcript:\n{transcript_text[:4000]}"},
         ],
         "response_format": {"type": "json_object"},
@@ -218,6 +235,8 @@ def extract_message_units(
                 confidence=float(ru.get("confidence", 0.5)),
                 unit_role=_role,
                 unit_role_source="rule" if _role else None,
+                extraction_run_id=extraction_run_id,
+                prompt_version=prompt_version,
                 extracted_at=now,
                 model=model,
             )
@@ -246,8 +265,9 @@ def save_message_units(units: List[MessageUnit], client_id: str = DEFAULT_CLIENT
             INSERT INTO message_units (
                 unit_id, client_id, post_id, text, claim, advice, topic, topic_id,
                 taxonomy_id, subtopic, content_type, confidence, extracted_at, model,
-                unit_role, unit_role_source, unit_role_confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                unit_role, unit_role_source, unit_role_confidence,
+                extraction_run_id, prompt_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (unit_id) DO NOTHING
             """,
             [
@@ -266,6 +286,8 @@ def save_message_units(units: List[MessageUnit], client_id: str = DEFAULT_CLIENT
                     getattr(u, "unit_role", None),
                     getattr(u, "unit_role_source", None),
                     getattr(u, "unit_role_confidence", None),
+                    getattr(u, "extraction_run_id", None),
+                    getattr(u, "prompt_version", None),
                 )
                 for u in units
             ],

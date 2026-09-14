@@ -113,6 +113,7 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
         advice TEXT, topic TEXT, subtopic TEXT, content_type TEXT,
         confidence DOUBLE, source_start DOUBLE, source_end DOUBLE,
         extracted_at TIMESTAMP, model TEXT,
+        extraction_run_id TEXT, prompt_version TEXT,
         embedding FLOAT[1536], embedded_at TIMESTAMP,
         embedding_cost_usd DOUBLE
     )""")

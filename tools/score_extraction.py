@@ -16,7 +16,8 @@ KNOWN GAPS:
   - the agreement figure from `compare` is only as good as the sample you mark
 
     score_extraction.py score <db>              measure the corpus
-    score_extraction.py blind <db> [n] [out]    write n units for human marking
+    score_extraction.py blind <db> [n] [out] [--run-id NAME]
+                                                write n units for human marking
     score_extraction.py compare <marked.tsv> [db]  agreement between you and it
 
   --paraphrase-threshold <0..1> retunes the PARAPHRASE cut-off for `score` and
@@ -226,7 +227,7 @@ def tsv_cell(value) -> str:
     return " ".join(str(value or "").split()).replace("\t", " ")
 
 
-def load(db_path: str):
+def load(db_path: str, run_id: str | None = None):
     import duckdb
     conn = duckdb.connect(db_path, read_only=True)
     try:
@@ -235,6 +236,13 @@ def load(db_path: str):
             "WHERE table_name='message_units'").fetchall()]
         if "claim" not in cols or "text" not in cols:
             raise SystemExit("message_units needs both `claim` and `text` columns")
+        if run_id and "extraction_run_id" not in cols:
+            raise SystemExit(
+                "\n  This database predates extraction_run_id, so `blind --run-id` "
+                "cannot target a run.\n\n"
+                "  Run the additive migration once:\n\n"
+                f"      python -c \"import core.db as db; db.DB_PATH='{db_path}'; db.init_db()\"\n"
+            )
         tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
         has_transcripts = "transcripts" in tables
         sel = (
@@ -244,11 +252,17 @@ def load(db_path: str):
         join = "LEFT JOIN transcripts t ON t.post_id = mu.post_id" if has_transcripts else ""
         if not has_transcripts:
             sel = sel.replace("t.transcript", "NULL")
+        where = ["mu.claim IS NOT NULL", "mu.text IS NOT NULL"]
+        params = []
+        if run_id:
+            where.append("mu.extraction_run_id = ?")
+            params.append(run_id)
         return conn.execute(
             f"SELECT {sel} FROM message_units mu "
             f"{join} "
-            "WHERE mu.claim IS NOT NULL AND mu.text IS NOT NULL "
-            "ORDER BY mu.unit_id"
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY mu.unit_id",
+            params,
         ).fetchall()
     finally:
         conn.close()
@@ -336,9 +350,9 @@ def cmd_score(db_path: str,
     print("  Nothing here judges whether a claim is TRUE. Run `blind` for that.\n")
 
 
-def cmd_blind(db_path: str, n: int, out: str):
+def cmd_blind(db_path: str, n: int, out: str, run_id: str | None = None):
     import random
-    rows = load(db_path)
+    rows = load(db_path, run_id=run_id)
     random.seed(7)  # reproducible, so the scorer cannot be tuned to the sample
     sample = random.sample(rows, min(n, len(rows)))
     with open(out, "w", encoding="utf-8") as fh:
@@ -354,6 +368,8 @@ def cmd_blind(db_path: str, n: int, out: str):
             te = tsv_cell(transcript_excerpt(transcript, claim, text))
             fh.write(f"{uid}\t?\t{c}\t{s}\t{te}\n")
     print(f"\nWrote {len(sample)} units to {out}")
+    if run_id:
+        print(f"Sample restricted to extraction_run_id={run_id!r}.")
     print("No verdicts included — the scorer's opinion is withheld on purpose,")
     print("so your reading is not anchored by it.")
     print(f"\nMark the VERDICT column, then: score_extraction.py compare {out} {db_path}\n")
@@ -443,6 +459,7 @@ def cmd_compare(marked: str, db_path: str | None = None,
 
 
 _THRESHOLD_FLAG = "--paraphrase-threshold"
+_RUN_ID_FLAG = "--run-id"
 
 
 def take_threshold(argv: list[str]) -> tuple[list[str], float | None]:
@@ -488,10 +505,37 @@ def take_threshold(argv: list[str]) -> tuple[list[str], float | None]:
     return rest, threshold
 
 
+def take_run_id(argv: list[str]) -> tuple[list[str], str | None]:
+    """Pull --run-id out of argv, returning the rest unchanged."""
+    rest: list[str] = []
+    run_id: str | None = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == _RUN_ID_FLAG:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"{_RUN_ID_FLAG} needs a value.")
+            run_id = argv[i + 1].strip()
+            i += 2
+            continue
+        if arg.startswith(_RUN_ID_FLAG + "="):
+            run_id = arg.split("=", 1)[1].strip()
+            i += 1
+            continue
+        rest.append(arg)
+        i += 1
+    if run_id == "":
+        raise SystemExit(f"{_RUN_ID_FLAG} needs a non-empty value.")
+    return rest, run_id
+
+
 if __name__ == "__main__":
     a, override = take_threshold(sys.argv[1:])
+    a, run_id = take_run_id(a)
     threshold = DEFAULT_PARAPHRASE_THRESHOLD if override is None else override
     if len(a) >= 2 and a[0] == "score":
+        if run_id is not None:
+            raise SystemExit(f"{_RUN_ID_FLAG} only applies to `blind`.")
         cmd_score(a[1], threshold)
     elif len(a) >= 2 and a[0] == "blind":
         if override is not None:
@@ -502,8 +546,15 @@ if __name__ == "__main__":
                 f"{_THRESHOLD_FLAG} does not apply to `blind` — it writes units "
                 "for you to mark and never scores them. Pass it to `compare`."
             )
-        cmd_blind(a[1], int(a[2]) if len(a) > 2 else 100, a[3] if len(a) > 3 else "extraction_sample.tsv")
+        cmd_blind(
+            a[1],
+            int(a[2]) if len(a) > 2 else 100,
+            a[3] if len(a) > 3 else "extraction_sample.tsv",
+            run_id=run_id,
+        )
     elif len(a) >= 2 and a[0] == "compare":
+        if run_id is not None:
+            raise SystemExit(f"{_RUN_ID_FLAG} only applies to `blind`.")
         cmd_compare(a[1], a[2] if len(a) > 2 else None, threshold)
     else:
         print(__doc__)

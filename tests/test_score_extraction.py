@@ -185,6 +185,41 @@ def test_blind_writes_transcript_excerpt(tmp_path):
     assert len(row) < len(long_transcript)
 
 
+def test_blind_can_sample_one_extraction_run(tmp_path):
+    from tools.score_extraction import cmd_blind
+
+    db_path = _make_score_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    conn.execute("ALTER TABLE message_units ADD COLUMN extraction_run_id TEXT")
+    _insert_unit(
+        conn,
+        "old_unit",
+        "p1",
+        "old claim",
+        "old source",
+    )
+    _insert_unit(
+        conn,
+        "new_unit",
+        "p2",
+        "new claim",
+        "new source",
+    )
+    conn.execute(
+        "UPDATE message_units SET extraction_run_id = 'sample-run' WHERE unit_id = 'new_unit'"
+    )
+    conn.close()
+
+    out_path = tmp_path / "sample.tsv"
+    cmd_blind(db_path, 10, str(out_path), run_id="sample-run")
+
+    text = out_path.read_text(encoding="utf-8")
+    assert "new_unit" in text
+    assert "new claim" in text
+    assert "old_unit" not in text
+    assert "old claim" not in text
+
+
 def test_compare_counts_lifted_as_lazy_not_wrong(tmp_path, capsys):
     from tools.score_extraction import cmd_compare
 

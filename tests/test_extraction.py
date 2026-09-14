@@ -142,6 +142,28 @@ class TestExtractMessageUnits:
         assert u.confidence == pytest.approx(0.9)
         assert u.post_id == "post_001"
         assert u.unit_id is not None
+        assert u.prompt_version.startswith("sha256:")
+        assert u.extraction_run_id is None
+
+    def test_extraction_can_tag_a_run_id(self):
+        from analysis.extraction import extract_message_units
+
+        raw_units = [_sample_unit()]
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = _make_openai_response(raw_units)
+
+        with patch("analysis.extraction.requests.post", return_value=mock_resp):
+            units, _ = extract_message_units(
+                "Always tailor your resume for each job. ATS systems filter by keywords.",
+                "post_001",
+                "fake_key",
+                extraction_run_id="stance-sample",
+            )
+
+        assert units[0].extraction_run_id == "stance-sample"
+        assert units[0].prompt_version.startswith("sha256:")
 
     def test_cost_is_calculated(self):
         from analysis.extraction import extract_message_units
@@ -280,11 +302,17 @@ class TestSaveMessageUnits:
         save_message_units([unit])
 
         conn = duckdb.connect(db_mod.DB_PATH)
-        count = conn.execute(
-            "SELECT COUNT(*) FROM message_units WHERE post_id = 'post_save_test'"
-        ).fetchone()[0]
+        count, run_id, prompt_version = conn.execute(
+            """
+            SELECT COUNT(*), MAX(extraction_run_id), MAX(prompt_version)
+            FROM message_units
+            WHERE post_id = 'post_save_test'
+            """
+        ).fetchone()
         conn.close()
         assert count == 1
+        assert run_id is None
+        assert prompt_version is None
 
         db_mod.DB_PATH = old_path
 
