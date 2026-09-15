@@ -1174,3 +1174,65 @@ def test_score_by_account_requires_client(tmp_path):
     with pytest.raises(SystemExit) as exc:
         cmd_score(db_path, by_account=True)
     assert "--client CLIENT" in str(exc.value)
+
+
+def test_duplicate_pairs_stem_each_claim_once(monkeypatch):
+    """The stemming must not live inside the O(n^2) loop.
+
+    Comparison is pairwise, so anything in the inner loop runs ~14 million
+    times on the real 5,354-unit corpus. Stemming both claims there meant
+    every claim was re-tokenised once per other unit — 28 million stemming
+    calls for 5,354 claims, and a projected 13.5-minute run that the fix
+    brought to 32 seconds with identical output.
+
+    Asserting on wall-clock would be flaky, so this asserts the property that
+    causes it: each claim is stemmed exactly once.
+    """
+    import importlib.util, pathlib, sys
+    root = pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("se_perf", root / "tools" / "score_extraction.py")
+    se = importlib.util.module_from_spec(spec); sys.modules["se_perf"] = se
+    spec.loader.exec_module(se)
+
+    units = [
+        se.DuplicateUnit(f"u{i}", f"p{i // 3}", f"Tailor your resume for role number {i}")
+        for i in range(30)
+    ]
+
+    calls = []
+    real = se.claim_stems
+    monkeypatch.setattr(se, "claim_stems", lambda claim: calls.append(claim) or real(claim))
+
+    se.find_duplicate_pairs(units, se.DEFAULT_PARAPHRASE_THRESHOLD)
+
+    # 30 units: once each. The pre-fix version made 2 * (30*29/2) = 870 calls.
+    assert len(calls) == len(units), f"stemmed {len(calls)} times for {len(units)} units"
+
+
+def test_duplicate_pairs_find_the_same_pairs_as_pairwise_restemming():
+    """The fast path must agree with the obvious slow one, exactly."""
+    import importlib.util, pathlib, sys, random
+    root = pathlib.Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("se_equiv", root / "tools" / "score_extraction.py")
+    se = importlib.util.module_from_spec(spec); sys.modules["se_equiv"] = se
+    spec.loader.exec_module(se)
+
+    random.seed(7)
+    vocab = ("resume interview recruiter linkedin salary cover letter ats keyword "
+             "tailor skill experience manager hiring role apply job search").split()
+    units = [
+        se.DuplicateUnit(f"u{i}", f"p{i // 4}", " ".join(random.sample(vocab, 8)))
+        for i in range(80)
+    ]
+
+    fast = {(p.left.unit_id, p.right.unit_id, round(p.overlap, 12))
+            for p in se.find_duplicate_pairs(units, se.DEFAULT_PARAPHRASE_THRESHOLD)}
+    slow = set()
+    for i, left in enumerate(units):
+        for right in units[i + 1:]:
+            overlap = se.shared_stem_overlap(left.claim, right.claim)
+            if overlap is not None and overlap >= se.DEFAULT_PARAPHRASE_THRESHOLD:
+                slow.add((left.unit_id, right.unit_id, round(overlap, 12)))
+
+    assert fast == slow
+    assert slow, "fixture produced no duplicate pairs, so the comparison proves nothing"
