@@ -220,6 +220,46 @@ def test_blind_can_sample_one_extraction_run(tmp_path):
     assert "old claim" not in text
 
 
+def test_blind_cli_can_sample_one_extraction_run(tmp_path):
+    import pathlib
+    import subprocess
+    import sys
+
+    db_path = _make_score_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    conn.execute("ALTER TABLE message_units ADD COLUMN extraction_run_id TEXT")
+    _insert_unit(conn, "old_unit", "p1", "old claim", "old source")
+    _insert_unit(conn, "new_unit", "p2", "new claim", "new source")
+    conn.execute(
+        "UPDATE message_units SET extraction_run_id = 'sample-run' WHERE unit_id = 'new_unit'"
+    )
+    conn.close()
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    out_path = tmp_path / "sample.tsv"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "tools" / "score_extraction.py"),
+            "blind",
+            db_path,
+            "10",
+            str(out_path),
+            "--run-id",
+            "sample-run",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = out_path.read_text(encoding="utf-8")
+    assert "new_unit" in text
+    assert "old_unit" not in text
+    assert "Sample restricted to extraction_run_id='sample-run'." in result.stdout
+
+
 def test_compare_counts_lifted_as_lazy_not_wrong(tmp_path, capsys):
     from tools.score_extraction import cmd_compare
 
@@ -447,12 +487,7 @@ class TestSemanticLaziness:
 
 
 class TestParaphraseThresholdFlag:
-    """The threshold is only retunable 'without a code change' if it can be
-    reached from a terminal. A keyword argument on score_pair() cannot be:
-    the CLI takes its arguments positionally, so the flag has to be lifted out
-    of argv before dispatch or it shifts <db> into the next slot and the
-    failure surfaces as a bad database path.
-    """
+    """The threshold is only retunable if it reaches score and compare."""
 
     def _se(self):
         import importlib.util, pathlib
@@ -461,56 +496,48 @@ class TestParaphraseThresholdFlag:
         m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         return m
 
-    def test_absent_flag_leaves_argv_untouched(self):
-        se = self._se()
-        assert se.take_threshold(["score", "reels.duckdb"]) == (["score", "reels.duckdb"], None)
-
-    def test_flag_is_removed_so_positionals_keep_their_slots(self):
-        se = self._se()
-        rest, value = se.take_threshold(
-            ["compare", "marked.tsv", "reels.duckdb", "--paraphrase-threshold", "0.25"]
-        )
-        assert rest == ["compare", "marked.tsv", "reels.duckdb"]
-        assert value == 0.25
-
-    def test_flag_may_appear_before_the_subcommand(self):
-        se = self._se()
-        rest, value = se.take_threshold(["--paraphrase-threshold=0.5", "score", "reels.duckdb"])
-        assert rest == ["score", "reels.duckdb"]
-        assert value == 0.5
-
-    @pytest.mark.parametrize("argv", [
-        ["score", "db", "--paraphrase-threshold", "abc"],
-        ["score", "db", "--paraphrase-threshold", "0"],
-        ["score", "db", "--paraphrase-threshold", "1.5"],
-        ["score", "db", "--paraphrase-threshold", "-0.2"],
-        ["score", "db", "--paraphrase-threshold"],
-    ])
-    def test_unusable_values_are_refused_not_absorbed(self, argv):
+    @pytest.mark.parametrize("value", ["abc", "0", "1.5", "-0.2"])
+    def test_unusable_values_are_refused_not_absorbed(self, value):
+        import argparse
         se = self._se()
         # A measuring tool that silently accepts a nonsense threshold reports a
         # number that looks fine and means nothing. Fail at the boundary.
-        with pytest.raises(SystemExit):
-            se.take_threshold(argv)
+        with pytest.raises(argparse.ArgumentTypeError):
+            se._paraphrase_threshold(value)
 
     def test_one_point_zero_is_allowed(self):
         se = self._se()
         # Strict, but meaningful: every stemmed content word of the claim
         # present in the source. Only 0 is useless, and only 0 is refused.
-        assert se.take_threshold(["score", "db", "--paraphrase-threshold", "1.0"])[1] == 1.0
+        assert se._paraphrase_threshold("1.0") == 1.0
 
-    def test_the_commands_accept_the_threshold(self):
-        se = self._se()
-        import inspect
-        # Signature only. This test alone is NOT enough — a command can take
-        # the argument and never pass it on, and this still passes. The two
-        # tests below are the ones that catch that, and they were written
-        # because a mutation that made cmd_compare ignore the threshold left
-        # this assertion green.
-        for fn in (se.cmd_score, se.cmd_compare):
-            assert "paraphrase_threshold" in inspect.signature(fn).parameters
-        # `blind` deliberately does not: it withholds every scorer opinion.
-        assert "paraphrase_threshold" not in inspect.signature(se.cmd_blind).parameters
+    def test_bare_invocation_prints_docstring_and_exits_2(self):
+        import subprocess, sys, pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [sys.executable, str(root / "tools" / "score_extraction.py")],
+            capture_output=True, text=True, cwd=str(root))
+        assert result.returncode == 2
+        assert "KNOWN GAPS" in result.stdout
+        assert "no API key, no spend, no LLM judging an LLM" in result.stdout
+
+    def test_blind_rejects_threshold_and_names_compare(self):
+        import subprocess, sys, pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(root / "tools" / "score_extraction.py"),
+                "blind",
+                "reels.duckdb",
+                "--paraphrase-threshold",
+                "0.3",
+            ],
+            capture_output=True, text=True, cwd=str(root))
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0
+        assert "--paraphrase-threshold" in combined
+        assert "compare" in combined
 
     # One real pair from the 2026-09-13 blind sample, hand-marked "lazy".
     # Stemmed overlap 0.33 — above the shipped 0.30, so it is a live case on

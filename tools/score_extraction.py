@@ -26,6 +26,7 @@ KNOWN GAPS:
 """
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from collections import Counter
@@ -480,104 +481,89 @@ def cmd_compare(marked: str, db_path: str | None = None,
     print()
 
 
-_THRESHOLD_FLAG = "--paraphrase-threshold"
-_RUN_ID_FLAG = "--run-id"
-
-
-def take_threshold(argv: list[str]) -> tuple[list[str], float | None]:
-    """Pull --paraphrase-threshold out of argv, returning the rest unchanged.
-
-    The commands take their arguments positionally, so the flag has to be
-    removed before dispatch rather than parsed alongside — otherwise passing it
-    shifts <db> into the <n> slot and the failure looks like a bad database
-    path. Accepts both "--paraphrase-threshold 0.25" and "=0.25".
-    """
-    rest: list[str] = []
-    value: str | None = None
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == _THRESHOLD_FLAG:
-            if i + 1 >= len(argv):
-                raise SystemExit(f"{_THRESHOLD_FLAG} needs a value between 0 and 1.")
-            value = argv[i + 1]
-            i += 2
-            continue
-        if arg.startswith(_THRESHOLD_FLAG + "="):
-            value = arg.split("=", 1)[1]
-            i += 1
-            continue
-        rest.append(arg)
-        i += 1
-
-    if value is None:
-        return rest, None
+def _paraphrase_threshold(value: str) -> float:
     try:
-        threshold = float(value)
+        parsed = float(value)
     except ValueError:
-        raise SystemExit(f"{_THRESHOLD_FLAG}: {value!r} is not a number.")
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number.")
     # 0 flags every unit that has no shared 4-gram, which is silently useless
     # rather than loudly wrong — the worst way for a measuring tool to fail.
     # 1.0 is strict but meaningful (total overlap), so it stays allowed.
-    if not 0 < threshold <= 1:
-        raise SystemExit(
-            f"{_THRESHOLD_FLAG}: {threshold} is outside 0-1. "
+    if not 0 < parsed <= 1:
+        raise argparse.ArgumentTypeError(
+            f"{parsed} is outside 0-1. "
             f"The calibrated default is {DEFAULT_PARAPHRASE_THRESHOLD}."
         )
-    return rest, threshold
+    return parsed
 
 
-def take_run_id(argv: list[str]) -> tuple[list[str], str | None]:
-    """Pull --run-id out of argv, returning the rest unchanged."""
-    rest: list[str] = []
-    run_id: str | None = None
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == _RUN_ID_FLAG:
-            if i + 1 >= len(argv):
-                raise SystemExit(f"{_RUN_ID_FLAG} needs a value.")
-            run_id = argv[i + 1].strip()
-            i += 2
-            continue
-        if arg.startswith(_RUN_ID_FLAG + "="):
-            run_id = arg.split("=", 1)[1].strip()
-            i += 1
-            continue
-        rest.append(arg)
-        i += 1
-    if run_id == "":
-        raise SystemExit(f"{_RUN_ID_FLAG} needs a non-empty value.")
-    return rest, run_id
+def _non_empty(value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("value must be non-empty.")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    score = subparsers.add_parser("score")
+    score.add_argument("db")
+    score.add_argument(
+        "--paraphrase-threshold",
+        type=_paraphrase_threshold,
+        default=DEFAULT_PARAPHRASE_THRESHOLD,
+    )
+
+    blind = subparsers.add_parser("blind")
+    blind.add_argument("db")
+    blind.add_argument("n", nargs="?", type=int, default=100)
+    blind.add_argument("out", nargs="?", default="extraction_sample.tsv")
+    blind.add_argument("--run-id", type=_non_empty)
+
+    compare = subparsers.add_parser("compare")
+    compare.add_argument("marked")
+    compare.add_argument("db", nargs="?")
+    compare.add_argument(
+        "--paraphrase-threshold",
+        type=_paraphrase_threshold,
+        default=DEFAULT_PARAPHRASE_THRESHOLD,
+    )
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        print(__doc__)
+        return 2
+
+    if argv[0] == "blind" and any(
+        arg == "--paraphrase-threshold" or arg.startswith("--paraphrase-threshold=")
+        for arg in argv[1:]
+    ):
+        raise SystemExit(
+            "--paraphrase-threshold does not apply to `blind` — it writes units "
+            "for you to mark and never scores them. Pass it to `compare`."
+        )
+
+    args = build_parser().parse_args(argv)
+    if args.command == "score":
+        cmd_score(args.db, args.paraphrase_threshold)
+        return 0
+    if args.command == "blind":
+        cmd_blind(args.db, args.n, args.out, run_id=args.run_id)
+        return 0
+    if args.command == "compare":
+        cmd_compare(args.marked, args.db, args.paraphrase_threshold)
+        return 0
+    return 2
 
 
 if __name__ == "__main__":
-    a, override = take_threshold(sys.argv[1:])
-    a, run_id = take_run_id(a)
-    threshold = DEFAULT_PARAPHRASE_THRESHOLD if override is None else override
-    if len(a) >= 2 and a[0] == "score":
-        if run_id is not None:
-            raise SystemExit(f"{_RUN_ID_FLAG} only applies to `blind`.")
-        cmd_score(a[1], threshold)
-    elif len(a) >= 2 and a[0] == "blind":
-        if override is not None:
-            # `blind` withholds every scorer opinion on purpose. Accepting the
-            # flag here and ignoring it would let someone believe they had
-            # changed a sample they had not.
-            raise SystemExit(
-                f"{_THRESHOLD_FLAG} does not apply to `blind` — it writes units "
-                "for you to mark and never scores them. Pass it to `compare`."
-            )
-        cmd_blind(
-            a[1],
-            int(a[2]) if len(a) > 2 else 100,
-            a[3] if len(a) > 3 else "extraction_sample.tsv",
-            run_id=run_id,
-        )
-    elif len(a) >= 2 and a[0] == "compare":
-        if run_id is not None:
-            raise SystemExit(f"{_RUN_ID_FLAG} only applies to `blind`.")
-        cmd_compare(a[1], a[2] if len(a) > 2 else None, threshold)
-    else:
-        print(__doc__)
-        sys.exit(2)
+    raise SystemExit(main())
