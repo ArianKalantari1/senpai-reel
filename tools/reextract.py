@@ -10,10 +10,10 @@ deletes, overwrites, or cleans up existing message_units rows.
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from contextlib import contextmanager
 from datetime import datetime
-from itertools import zip_longest
 
 sys.path.insert(0, __file__.rsplit("/tools/", 1)[0])
 
@@ -36,6 +36,8 @@ _REQUIRED_COLUMNS = (
     "extraction_run_id",
     "prompt_version",
 )
+
+_SAMPLE_SEED = 7
 
 
 def _connect(db_path: str, read_only: bool):
@@ -82,7 +84,7 @@ def _default_run_id() -> str:
 
 
 def _select_posts(conn, client_id: str, limit: int):
-    return conn.execute(
+    rows = conn.execute(
         """
         SELECT
             t.post_id,
@@ -99,10 +101,12 @@ def _select_posts(conn, client_id: str, limit: int):
           AND LENGTH(TRIM(t.transcript)) > 0
         GROUP BY t.post_id, t.transcript
         ORDER BY t.post_id
-        LIMIT ?
         """,
-        [client_id, client_id, limit],
+        [client_id, client_id],
     ).fetchall()
+    # Reproducible, so validation cannot be tuned to a convenient slice.
+    rng = random.Random(_SAMPLE_SEED)
+    return rng.sample(rows, min(limit, len(rows)))
 
 
 def _run_id_exists(conn, run_id: str) -> bool:
@@ -233,9 +237,18 @@ def cmd_compare(db_path: str, run_id: str, *, client_id: str) -> int:
             old_rows = _rows_for_compare(conn, post_id, client_id, run_id, new=False)
             new_rows = _rows_for_compare(conn, post_id, client_id, run_id, new=True)
             print(f"Post {post_id}: before {len(old_rows)} unit(s), run {len(new_rows)} unit(s)")
-            print("  # | before | run")
-            for idx, (old, new) in enumerate(zip_longest(old_rows, new_rows), start=1):
-                print(f"  {idx} | {_cell(old)} | {_cell(new)}")
+            print("  before:")
+            if old_rows:
+                for idx, old in enumerate(old_rows, start=1):
+                    print(f"    {idx}. {_cell(old)}")
+            else:
+                print("    (none)")
+            print("  run:")
+            if new_rows:
+                for idx, new in enumerate(new_rows, start=1):
+                    print(f"    {idx}. {_cell(new)}")
+            else:
+                print("    (none)")
             print()
     finally:
         conn.close()

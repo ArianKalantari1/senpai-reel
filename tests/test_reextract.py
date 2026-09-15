@@ -61,6 +61,63 @@ def _seed_reextract_db(tmp_path):
     return db_path, db_mod, old_path
 
 
+def _seed_reextract_sample_db(
+    tmp_path,
+    post_ids=("post_a", "post_b", "post_c", "post_d", "post_e", "post_f"),
+):
+    import core.db as db_mod
+
+    old_path = db_mod.DB_PATH
+    db_mod.DB_PATH = str(tmp_path / "reextract_sample.duckdb")
+    db_mod.init_db()
+    db_path = db_mod.DB_PATH
+    client_id = db_mod.DEFAULT_CLIENT_ID
+
+    conn = duckdb.connect(db_path)
+    now = datetime.utcnow()
+    for post_id in post_ids:
+        conn.execute(
+            """
+            INSERT INTO posts (
+                post_id, client_id, account_id, engagement_rate, download_status,
+                scraped_at, hashtags, mentions
+            )
+            VALUES (?, ?, 'acc1', 0, 'done', ?, [], [])
+            """,
+            [post_id, client_id, now],
+        )
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+            [client_id, post_id, now],
+        )
+        conn.execute(
+            """
+            INSERT INTO transcripts (
+                post_id, client_id, provider, model, transcript, language,
+                confidence, duration_sec, word_count, transcribed_at, cost_usd
+            )
+            VALUES (?, ?, 'deepgram', 'nova-2', ?, 'en', 0.95, 30, 7, ?, 0.001)
+            """,
+            [post_id, client_id, f"Transcript for {post_id}", now],
+        )
+        conn.execute(
+            """
+            INSERT INTO message_units (
+                unit_id, client_id, post_id, text, claim, topic, content_type,
+                confidence, extracted_at, model
+            )
+            VALUES (
+                ?, ?, ?, 'old text', 'old claim', 'Resume', 'tip',
+                0.9, ?, 'gpt-4o-mini'
+            )
+            """,
+            [f"unit_{post_id}", client_id, post_id, now],
+        )
+    conn.close()
+
+    return db_path, db_mod, old_path, list(post_ids)
+
+
 def _legacy_unmigrated_db(tmp_path):
     path = str(tmp_path / "legacy.duckdb")
     conn = duckdb.connect(path)
@@ -101,6 +158,14 @@ def _row(db_path, unit_id):
         conn.close()
 
 
+def _selected_posts(output: str) -> list[str]:
+    return [
+        line.strip().split(":", 1)[0]
+        for line in output.splitlines()
+        if line.startswith("  post_")
+    ]
+
+
 def test_dry_run_on_unmigrated_db_explains_migration(tmp_path):
     from tools.reextract import main
 
@@ -135,6 +200,37 @@ def test_dry_run_uses_read_only_path_and_writes_nothing(tmp_path):
 
     assert after == before
     assert run_rows == 0
+
+
+def test_dry_run_same_run_id_selects_same_posts(tmp_path, capsys):
+    from tools.reextract import main
+
+    db_path, db_mod, old_path, _post_ids = _seed_reextract_sample_db(tmp_path)
+    try:
+        assert main(["run", db_path, "--posts", "3", "--run-id", "sample", "--dry-run"]) == 0
+        first = _selected_posts(capsys.readouterr().out)
+
+        assert main(["run", db_path, "--posts", "3", "--run-id", "sample", "--dry-run"]) == 0
+        second = _selected_posts(capsys.readouterr().out)
+    finally:
+        db_mod.DB_PATH = old_path
+
+    assert first == second
+    assert len(first) == 3
+
+
+def test_selection_is_seeded_sample_not_first_posts_by_id(tmp_path, capsys):
+    from tools.reextract import main
+
+    db_path, db_mod, old_path, post_ids = _seed_reextract_sample_db(tmp_path)
+    try:
+        assert main(["run", db_path, "--posts", "3", "--run-id", "sample", "--dry-run"]) == 0
+        selected = _selected_posts(capsys.readouterr().out)
+    finally:
+        db_mod.DB_PATH = old_path
+
+    assert selected
+    assert selected != sorted(post_ids)[:3]
 
 
 def test_run_appends_tagged_units_and_preserves_existing_rows(tmp_path, monkeypatch):
@@ -200,7 +296,7 @@ def test_run_appends_tagged_units_and_preserves_existing_rows(tmp_path, monkeypa
     assert calls[0][3]["extraction_run_id"] == "sample"
 
 
-def test_compare_prints_old_and_new_units_side_by_side(tmp_path, capsys):
+def test_compare_prints_old_and_new_units_as_independent_lists(tmp_path, capsys):
     from tools.reextract import cmd_compare
 
     db_path, db_mod, old_path = _seed_reextract_db(tmp_path)
@@ -228,6 +324,10 @@ def test_compare_prints_old_and_new_units_side_by_side(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "Post post_1: before 1 unit(s), run 1 unit(s)" in out
+    assert "  # | before | run" not in out
+    assert "\n  1 |" not in out
+    assert "  before:" in out
+    assert "  run:" in out
     assert "old_unit" in out
     assert "new_unit" in out
     assert "old claim" in out

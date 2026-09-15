@@ -380,7 +380,8 @@ def init_db():
         model        TEXT,
         source_units TEXT[],
         tokens_used  INTEGER,
-        cost_usd     DOUBLE
+        cost_usd     DOUBLE,
+        generation_run_id TEXT
     )
     """)
 
@@ -424,6 +425,11 @@ def init_db():
     # must stay NULL — do not backfill a guessed prompt/run onto legacy rows.
     _add_column_if_missing(conn, "message_units", "extraction_run_id", "TEXT")
     _add_column_if_missing(conn, "message_units", "prompt_version", "TEXT")
+
+    # ── Generation A/B provenance (creative-director-ai #41) ────────────────
+    # NULL means legacy/manual generation, not condition B. The A/B harness
+    # writes an explicit run id for both grounded and bare rows.
+    _add_column_if_missing(conn, "generated_content", "generation_run_id", "TEXT")
 
 
     # ── Per-persona taxonomy (creative-director-ai #25) ───────────────────────
@@ -515,6 +521,7 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_posts_download_status ON posts(download_status)",
         "CREATE INDEX IF NOT EXISTS idx_scrape_jobs_client_id ON scrape_jobs(client_id)",
         "CREATE INDEX IF NOT EXISTS idx_generated_content_client_id ON generated_content(client_id)",
+        "CREATE INDEX IF NOT EXISTS idx_generated_content_generation_run_id ON generated_content(generation_run_id)",
         "CREATE INDEX IF NOT EXISTS idx_message_units_client_id ON message_units(client_id)",
         "CREATE INDEX IF NOT EXISTS idx_message_units_topic ON message_units(topic)",
         "CREATE INDEX IF NOT EXISTS idx_message_units_post_id ON message_units(post_id)",
