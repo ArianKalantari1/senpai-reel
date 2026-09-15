@@ -659,3 +659,69 @@ class TestBlindRefusesToWriteAnEmptySample:
         assert out.exists()
         # Asking for more than exist is not an error, but it is worth saying.
         assert "only 1 were available" in capsys.readouterr().out
+
+
+class TestTheCliCarriesFlagsThroughToTheCommands:
+    """The dispatcher is the thing argparse replaced, so test the dispatcher.
+
+    TestParaphraseThresholdFlag above calls cmd_score/cmd_compare directly, so it
+    stays green when main() parses a flag correctly and then forgets to pass
+    it on. Three separate mutations of the dispatch lines survived that suite
+    untouched. These tests run the real command line instead.
+    """
+
+    _CLAIM = "Cracks in life come from living fully, not from failure."
+    _SOURCE = ("Careers crack, confidence cracks, relationship crack. "
+               "Not because you failed, but because you lived.")
+
+    def _run(self, args, cwd):
+        import subprocess, sys
+        return subprocess.run(
+            [sys.executable, str(cwd / "tools" / "score_extraction.py"), *args],
+            capture_output=True, text=True, cwd=str(cwd))
+
+    def _root(self):
+        import pathlib
+        return pathlib.Path(__file__).resolve().parent.parent
+
+    def test_compare_threshold_reaches_the_agreement_figure(self, tmp_path):
+        marked = tmp_path / "marked.tsv"
+        marked.write_text(
+            "unit_id\tVERDICT\tclaim\tsource\n"
+            f"u1\tlazy\t{self._CLAIM}\t{self._SOURCE}\n",
+            encoding="utf-8")
+        root = self._root()
+
+        permissive = self._run(
+            ["compare", str(marked), "--paraphrase-threshold", "0.10"], root)
+        strict = self._run(
+            ["compare", str(marked), "--paraphrase-threshold", "0.95"], root)
+
+        assert "1/1" in permissive.stdout, permissive.stdout + permissive.stderr
+        assert "0/1" in strict.stdout, strict.stdout + strict.stderr
+
+    def test_score_threshold_reaches_the_tally(self, tmp_path):
+        db_path = _make_score_db(tmp_path)
+        conn = duckdb.connect(db_path)
+        conn.execute("INSERT INTO message_units VALUES (?, ?, ?, ?, ?)",
+                     ["u1", "p1", self._CLAIM, self._SOURCE, "career"])
+        conn.close()
+        root = self._root()
+
+        permissive = self._run(
+            ["score", db_path, "--paraphrase-threshold", "0.10"], root)
+        strict = self._run(
+            ["score", db_path, "--paraphrase-threshold", "0.95"], root)
+
+        tallied = TestParaphraseThresholdFlag._flags_tallied
+        assert "PARAPHRASE" in tallied(permissive.stdout), permissive.stdout
+        assert "PARAPHRASE" not in tallied(strict.stdout), strict.stdout
+
+    def test_run_id_on_score_names_blind_rather_than_just_refusing(self, tmp_path):
+        result = self._run(["score", "reels.duckdb", "--run-id", "x"], self._root())
+        combined = result.stdout + result.stderr
+        assert result.returncode != 0
+        # Not `"blind" in combined`: argparse's own usage line lists every
+        # subcommand, so that assertion passes with the guard deleted. It has
+        # to be the sentence that tells the operator where the flag belongs.
+        assert "only `blind` selects an extraction run" in combined, combined
