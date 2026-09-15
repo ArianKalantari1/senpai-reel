@@ -15,7 +15,7 @@ class TestFormatReferenceContext:
     def test_empty_list_returns_string(self):
         from analysis.prompts import format_reference_context
         result = format_reference_context([])
-        assert isinstance(result, str)
+        assert result == "(no reference units selected)"
 
     def test_uses_claim_and_excludes_verbatim_text(self):
         """Competitor expression must not reach the generator (issue #17).
