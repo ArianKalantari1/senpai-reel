@@ -375,13 +375,30 @@ def load_duplicate_units(db_path: str, client_id: str) -> tuple[int, list[Duplic
     return len(rows), units
 
 
+def _overlap_from_stems(left: set[str], right: set[str]) -> float | None:
+    """shared_stem_overlap for stem sets that have already been computed.
+
+    The comparison is O(n^2) in units, so anything inside the inner loop runs
+    ~14 million times on a 5,000-unit corpus. Stemming each claim there meant
+    every claim was re-tokenised and re-stemmed once per other unit: 5,354
+    claims became 28 million stemming calls, and a real run took 13.5 minutes
+    instead of seconds. The stems depend only on the claim, so they are
+    computed once per unit by the caller.
+    """
+    if not left or not right:
+        return None
+    return len(left & right) / min(len(left), len(right))
+
+
 def find_duplicate_pairs(units: list[DuplicateUnit], threshold: float) -> list[DuplicatePair]:
     pairs: list[DuplicatePair] = []
+    stems = [claim_stems(unit.claim) for unit in units]
     for i, left in enumerate(units):
-        for right in units[i + 1:]:
-            overlap = shared_stem_overlap(left.claim, right.claim)
+        left_stems = stems[i]
+        for j in range(i + 1, len(units)):
+            overlap = _overlap_from_stems(left_stems, stems[j])
             if overlap is not None and overlap >= threshold:
-                pairs.append(DuplicatePair(left=left, right=right, overlap=overlap))
+                pairs.append(DuplicatePair(left=left, right=units[j], overlap=overlap))
     return sorted(
         pairs,
         key=lambda p: (-p.overlap, p.left.post_id, p.right.post_id, p.left.unit_id, p.right.unit_id),
