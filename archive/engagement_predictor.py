@@ -1,15 +1,42 @@
 import json
 import duckdb
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, r2_score
 import re
 from datetime import datetime
-import joblib
-import os
 
-from core.db import DEFAULT_CLIENT_ID
+from core.db import DEFAULT_CLIENT_ID, engagement_rate_of, opt_number
+
+try:
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import mean_absolute_error, r2_score
+    import joblib
+except ModuleNotFoundError:
+    RandomForestRegressor = None
+    train_test_split = None
+    mean_absolute_error = None
+    r2_score = None
+    joblib = None
+
+
+def _optional_model_dependencies():
+    if RandomForestRegressor is None or joblib is None:
+        raise ImportError(
+            "archive/engagement_predictor.py needs optional ML dependencies. "
+            "Install requirements-optional.txt before running it."
+        )
+
+
+def raw_engagement_rate(post_data):
+    likes = opt_number(post_data.get("likesCount"), int)
+    views = opt_number(post_data.get("videoViewCount"), int)
+    return engagement_rate_of(likes, views)
+
+
+def format_percent_or_unknown(value, digits=2):
+    if value is None:
+        return "unknown"
+    return f"{value:.{digits}f}%"
 
 class EngagementPredictor:
     """
@@ -18,6 +45,7 @@ class EngagementPredictor:
     """
     
     def __init__(self, db_path="reels.duckdb", client_id=DEFAULT_CLIENT_ID):
+        _optional_model_dependencies()
         self.conn = duckdb.connect(db_path)
         self.client_id = client_id
         self.model = RandomForestRegressor(n_estimators=100, random_state=42)
@@ -29,7 +57,7 @@ class EngagementPredictor:
         features = {}
         
         # Basic metrics
-        features['duration'] = post_data.get('videoDuration', 0) or 0
+        features['duration'] = opt_number(post_data.get('videoDuration'), float)
         features['caption_length'] = len(post_data.get('caption', '') or '')
         features['mentions_count'] = len(post_data.get('mentions', []) or [])
         features['hashtags_count'] = len(post_data.get('hashtags', []) or [])
@@ -55,14 +83,14 @@ class EngagementPredictor:
                 features['hour_of_day'] = dt.hour
                 features['day_of_week'] = dt.weekday()
                 features['is_weekend'] = 1 if dt.weekday() >= 5 else 0
-            except:
-                features['hour_of_day'] = 12  # Default
-                features['day_of_week'] = 3   # Default
-                features['is_weekend'] = 0
+            except ValueError:
+                features['hour_of_day'] = None
+                features['day_of_week'] = None
+                features['is_weekend'] = None
         else:
-            features['hour_of_day'] = 12
-            features['day_of_week'] = 3
-            features['is_weekend'] = 0
+            features['hour_of_day'] = None
+            features['day_of_week'] = None
+            features['is_weekend'] = None
         
         # Owner popularity (based on historical data)
         owner = post_data.get('ownerUsername', '')
@@ -88,16 +116,15 @@ class EngagementPredictor:
                 try:
                     data = json.loads(raw)
                     if data.get('ownerUsername') == owner:
-                        likes = data.get('likesCount', 0) or 0
-                        views = data.get('videoViewCount', 0) or 0
-                        if views > 0:
-                            engagements.append(likes/views*100)
-                except:
+                        engagement_rate = raw_engagement_rate(data)
+                        if engagement_rate is not None:
+                            engagements.append(engagement_rate)
+                except (TypeError, json.JSONDecodeError):
                     continue
             
-            return sum(engagements) / len(engagements) if engagements else 5.0
-        except:
-            return 5.0  # Default engagement rate
+            return sum(engagements) / len(engagements) if engagements else None
+        except duckdb.Error:
+            return None
     
     def prepare_training_data(self):
         """Prepare training data from database"""
@@ -113,12 +140,10 @@ class EngagementPredictor:
             try:
                 data = json.loads(raw)
                 
-                # Calculate target (engagement rate)
-                likes = data.get('likesCount', 0) or 0
-                views = data.get('videoViewCount', 0) or 0
-                
-                if views > 0:  # Only include posts with views
-                    engagement_rate = (likes / views) * 100
+                # Calculate target (engagement rate). Unknown labels are
+                # excluded; treating them as 0% would poison the training set.
+                engagement_rate = raw_engagement_rate(data)
+                if engagement_rate is not None:
                     
                     # Extract features
                     features = self.extract_features(data)
@@ -130,7 +155,7 @@ class EngagementPredictor:
                     if not self.feature_names:
                         self.feature_names = list(features.keys())
                         
-            except Exception as e:
+            except (TypeError, json.JSONDecodeError):
                 continue
         
         return pd.DataFrame(X, columns=self.feature_names), y
@@ -185,7 +210,7 @@ class EngagementPredictor:
             return None
         
         features = self.extract_features(post_data)
-        feature_vector = [features.get(name, 0) for name in self.feature_names]
+        feature_vector = [features.get(name) for name in self.feature_names]
         
         prediction = self.model.predict([feature_vector])[0]
         return max(0, prediction)  # Ensure non-negative
@@ -215,12 +240,20 @@ class EngagementPredictor:
             test_post.update(changes)
             
             new_prediction = self.predict_engagement(test_post)
-            improvement = new_prediction - base_prediction
+            improvement = (
+                new_prediction - base_prediction
+                if new_prediction is not None and base_prediction is not None
+                else None
+            )
             
             optimizations[scenario] = {
                 'predicted_engagement': new_prediction,
                 'improvement': improvement,
-                'improvement_percent': (improvement / base_prediction * 100) if base_prediction > 0 else 0
+                'improvement_percent': (
+                    improvement / base_prediction * 100
+                    if base_prediction is not None and base_prediction > 0
+                    else None
+                )
             }
         
         return optimizations
@@ -239,17 +272,15 @@ class EngagementPredictor:
         for (raw,) in results:
             try:
                 data = json.loads(raw)
-                likes = data.get('likesCount', 0) or 0
-                views = data.get('videoViewCount', 0) or 0
+                engagement_rate = raw_engagement_rate(data)
                 
-                if views > 0:
-                    engagement_rate = (likes / views) * 100
+                if engagement_rate is not None:
                     data['calculated_engagement'] = engagement_rate
                     all_posts.append(data)
                     
                     if engagement_rate > 10:  # High engagement threshold
                         high_performers.append(data)
-            except:
+            except (TypeError, json.JSONDecodeError):
                 continue
         
         if not high_performers:
@@ -258,10 +289,18 @@ class EngagementPredictor:
         recommendations = []
         
         # Analyze high performers
-        avg_duration = sum(p.get('videoDuration', 0) for p in high_performers) / len(high_performers)
+        known_durations = [
+            duration for duration in
+            (opt_number(p.get('videoDuration'), float) for p in high_performers)
+            if duration is not None
+        ]
         avg_caption_length = sum(len(p.get('caption', '') or '') for p in high_performers) / len(high_performers)
         
-        recommendations.append(f"🎯 Optimal video duration: {avg_duration:.1f} seconds (based on top performers)")
+        if known_durations:
+            avg_duration = sum(known_durations) / len(known_durations)
+            recommendations.append(f"🎯 Optimal video duration: {avg_duration:.1f} seconds (based on top performers)")
+        else:
+            recommendations.append("🎯 Optimal video duration: unknown (top performers did not supply duration)")
         recommendations.append(f"📝 Ideal caption length: {avg_caption_length:.0f} characters")
         
         # Common hashtags in high performers
@@ -287,7 +326,7 @@ class EngagementPredictor:
                     dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
                     hours.append(dt.hour)
                     days.append(dt.weekday())
-                except:
+                except ValueError:
                     continue
             
             if hours:
@@ -323,7 +362,7 @@ def main():
             
             print(f"\n🔮 Testing prediction on sample post:")
             print(f"   Short Code: {sample_post.get('shortCode')}")
-            print(f"   Actual Engagement: {((sample_post.get('likesCount', 0) or 0) / (sample_post.get('videoViewCount', 0) or 1) * 100):.2f}%")
+            print(f"   Actual Engagement: {format_percent_or_unknown(raw_engagement_rate(sample_post))}")
             
             predicted = predictor.predict_engagement(sample_post)
             print(f"   Predicted Engagement: {predicted:.2f}%")
@@ -332,7 +371,11 @@ def main():
             print(f"\n🚀 Content Optimization Suggestions:")
             optimizations = predictor.analyze_content_optimization(sample_post)
             
-            for scenario, data in sorted(optimizations.items(), key=lambda x: x[1]['improvement'], reverse=True)[:5]:
+            known_optimizations = [
+                item for item in optimizations.items()
+                if item[1]['improvement'] is not None
+            ]
+            for scenario, data in sorted(known_optimizations, key=lambda x: x[1]['improvement'], reverse=True)[:5]:
                 if data['improvement'] > 0.1:  # Only show meaningful improvements
                     print(f"   {scenario.replace('_', ' ').title()}: +{data['improvement']:.1f}% engagement")
         
