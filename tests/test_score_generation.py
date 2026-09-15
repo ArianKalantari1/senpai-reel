@@ -367,3 +367,52 @@ def test_compare_reports_small_sample_and_per_condition_cost(tmp_path, capsys):
     assert "grounded $0.100000 total" in out
     assert "bare     $0.020000 total" in out
     assert "5.0x grounded/bare" in out
+
+
+def test_blind_refuses_rows_written_before_the_condition_column(tmp_path):
+    """A run id with no condition is the pre-#41 harness's output.
+
+    The column is added by an additive migration that backfills nothing, so
+    those rows survive with generation_condition NULL. Re-deriving the
+    condition from source_units is exactly what #41 removed — a grounded
+    generation whose references were all filtered out by the role firewall
+    reads as bare. Absent is not 'bare'; it is unrecoverable, and blind has to
+    say so instead of quietly scoring a mislabelled pair.
+    """
+    from tools import score_generation as sg
+
+    db_path, db_mod, old_path = _seed_generation_db(tmp_path)
+    client_id = db_mod.DEFAULT_CLIENT_ID
+    conn = duckdb.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO generated_content (
+            gen_id, client_id, created_at, topic, content_type, output_text,
+            model, source_units, tokens_used, cost_usd, generation_run_id,
+            generation_condition
+        )
+        VALUES
+          ('legacy_a', ?, CURRENT_TIMESTAMP, 'Resume', 'caption',
+           'grounded-looking', 'gpt-4o-mini', ['unit_a'], 100, 0.01, 'legacy-run', NULL),
+          ('legacy_b', ?, CURRENT_TIMESTAMP, 'Resume', 'caption',
+           'bare-looking', 'gpt-4o-mini', [], 50, 0.002, 'legacy-run', NULL)
+        """,
+        [client_id, client_id],
+    )
+    conn.close()
+
+    try:
+        try:
+            sg._load_pairs(db_path, client_id, "legacy-run")
+        except SystemExit as exc:
+            message = str(exc)
+            assert "no generation_condition" in message, message
+            # It has to name the way out, not just the problem: these rows
+            # cannot be repaired, only regenerated.
+            assert "Re-run the pair under a new run id" in message, message
+        else:
+            raise AssertionError(
+                "_load_pairs should refuse rows whose condition was never recorded"
+            )
+    finally:
+        db_mod.DB_PATH = old_path
