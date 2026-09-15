@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
 
@@ -64,7 +65,48 @@ def get_secret(name: str, st_module=None) -> str:
         except Exception:
             pass
 
-    return os.environ.get(name, "").strip()
+    env_value = os.environ.get(name, "").strip()
+    if env_value:
+        return env_value
+
+    return _secret_from_toml(name)
+
+
+# README tells people to put their keys in .streamlit/secrets.toml, and the app
+# reads them from there via st.secrets. The CLI tools call get_secret() without
+# a Streamlit module, so before this fallback existed they saw only the
+# environment — which meant the documented place to put a key was a place half
+# the codebase could not read it. `reextract.py` refused to run for exactly
+# that reason on a machine where the key was correctly configured.
+#
+# Environment still wins. An export is a deliberate act for one command; the
+# file is ambient configuration. This is purely a fallback, so nothing that
+# worked before changes behaviour.
+_SECRETS_TOML = Path(__file__).resolve().parent.parent / ".streamlit" / "secrets.toml"
+
+
+def _secret_from_toml(name: str, path: Path | None = None) -> str:
+    """Read one key from .streamlit/secrets.toml. Never raises.
+
+    A missing file, unreadable file, malformed TOML or absent key all mean the
+    same thing to the caller: not configured. Returns "" so `has_secret` stays
+    honest rather than a crash masquerading as a missing credential.
+    """
+    toml_path = path or _SECRETS_TOML
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python < 3.11
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            return ""
+    try:
+        with open(toml_path, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return ""
+    value = data.get(name, "")
+    return str(value).strip() if value else ""
 
 
 def has_secret(name: str, st_module=None) -> bool:
