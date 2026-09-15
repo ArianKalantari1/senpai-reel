@@ -16,6 +16,8 @@ KNOWN GAPS:
   - the agreement figure from `compare` is only as good as the sample you mark
 
     score_extraction.py score <db>              measure the corpus
+    score_extraction.py score <db> --by-account --client CLIENT
+                                                measure by creator account
     score_extraction.py blind <db> [n] [out] [--run-id NAME]
                                                 write n units for human marking
     score_extraction.py compare <marked.tsv> [db]  agreement between you and it
@@ -102,6 +104,7 @@ def stem(word: str) -> str:
 # Re-run the sweep when a larger marked sample exists. --paraphrase-threshold
 # exists so that does not require a code change.
 DEFAULT_PARAPHRASE_THRESHOLD = 0.30
+ACCOUNT_FLAGS = ("OK", "COPIED", "PARAPHRASE", "VAGUE", "LIFTED")
 
 
 def ngrams(t: list[str], n: int) -> set[tuple[str, ...]]:
@@ -295,8 +298,152 @@ def load_transcripts_by_unit(db_path: str, unit_ids: list[str]) -> dict[str, str
         conn.close()
 
 
+def load_by_account(db_path: str, client_id: str):
+    import duckdb
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        needed = {"message_units", "posts", "client_posts"}
+        missing = sorted(needed - tables)
+        if missing:
+            raise SystemExit(
+                "score --by-account needs "
+                + ", ".join(missing)
+                + " for client-scoped account reporting"
+            )
+
+        cols = [r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='message_units'").fetchall()]
+        if "claim" not in cols or "text" not in cols:
+            raise SystemExit("message_units needs both `claim` and `text` columns")
+
+        has_transcripts = "transcripts" in tables
+        transcript_sel = "t.transcript" if has_transcripts else "NULL"
+        transcript_join = "LEFT JOIN transcripts t ON t.post_id = p.post_id" if has_transcripts else ""
+        return conn.execute(
+            f"""
+            SELECT
+                COALESCE(ca.username, p.account_id, 'unknown') AS account,
+                p.post_id,
+                mu.unit_id,
+                mu.claim,
+                mu.text,
+                {transcript_sel} AS transcript
+            FROM posts p
+            JOIN client_posts cp
+              ON cp.post_id = p.post_id
+             AND cp.client_id = ?
+            LEFT JOIN creator_accounts ca
+              ON p.account_id = ca.account_id
+            LEFT JOIN message_units mu
+              ON mu.post_id = p.post_id
+             AND mu.claim IS NOT NULL
+             AND mu.text IS NOT NULL
+            {transcript_join}
+            ORDER BY account, p.post_id, mu.unit_id
+            """,
+            [client_id],
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _pct_text(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "no data"
+    return f"{numerator / denominator * 100:5.1f}%"
+
+
+def _units_per_post(units: int, posts: int) -> str:
+    if posts <= 0:
+        return "no data"
+    return f"{units / posts:5.2f}"
+
+
+def account_score_rows(rows, paraphrase_threshold: float):
+    accounts = {}
+    for account, post_id, unit_id, claim, text, transcript in rows:
+        stats = accounts.setdefault(account, {
+            "account": account,
+            "posts": set(),
+            "units": 0,
+            "transcript_units": 0,
+            "flags": Counter(),
+        })
+        stats["posts"].add(post_id)
+        if unit_id is None:
+            continue
+
+        stats["units"] += 1
+        pair_flags = set(score_pair(claim, text, paraphrase_threshold)["flags"])
+        transcript_result = score_transcript(claim, text, transcript)
+        lifted = "LIFTED" in transcript_result["flags"]
+        if transcript_result["has_transcript"]:
+            stats["transcript_units"] += 1
+
+        for flag in ACCOUNT_FLAGS[1:4]:
+            if flag in pair_flags:
+                stats["flags"][flag] += 1
+        if lifted:
+            stats["flags"]["LIFTED"] += 1
+        if not (pair_flags & {"COPIED", "PARAPHRASE", "VAGUE"}) and not lifted:
+            stats["flags"]["OK"] += 1
+
+    result = []
+    for stats in accounts.values():
+        units = stats["units"]
+        ok_pct = (stats["flags"]["OK"] / units * 100) if units else None
+        result.append({**stats, "ok_pct": ok_pct})
+    result.sort(key=lambda row: (row["ok_pct"] is None, -(row["ok_pct"] or 0), row["account"]))
+    return result
+
+
+def cmd_score_by_account(db_path: str, client_id: str,
+                         paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD):
+    rows = load_by_account(db_path, client_id)
+    accounts = account_score_rows(rows, paraphrase_threshold)
+
+    print(f"\nExtraction quality by account — client {client_id}\n")
+    if not accounts:
+        print("  No client-visible posts found.\n")
+        return
+
+    print("  Sorted by OK descending; accounts with no scored units sort last.")
+    print("  LIFTED uses transcript-covered units; without transcripts it is no data.\n")
+    print(
+        f"  {'account':24} {'units':>7} {'posts':>5} {'units/post':>10} "
+        f"{'OK':>8} {'COPIED':>8} {'PARAPHRASE':>11} {'VAGUE':>8} {'LIFTED':>8}"
+    )
+    for stats in accounts:
+        units = stats["units"]
+        posts = len(stats["posts"])
+        flags = stats["flags"]
+        lifted_denominator = stats["transcript_units"]
+        print(
+            f"  @{stats['account']:<23} "
+            f"{units:>7,} "
+            f"{posts:>5,} "
+            f"{_units_per_post(units, posts):>10} "
+            f"{_pct_text(flags['OK'], units):>8} "
+            f"{_pct_text(flags['COPIED'], units):>8} "
+            f"{_pct_text(flags['PARAPHRASE'], units):>11} "
+            f"{_pct_text(flags['VAGUE'], units):>8} "
+            f"{_pct_text(flags['LIFTED'], lifted_denominator):>8}"
+        )
+    print()
+
+
 def cmd_score(db_path: str,
-              paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD):
+              paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD,
+              by_account: bool = False,
+              client_id: str | None = None):
+    if by_account:
+        if not client_id:
+            raise SystemExit("score --by-account requires --client CLIENT for client-scoped reporting.")
+        cmd_score_by_account(db_path, client_id, paraphrase_threshold)
+        return
+
     rows = load(db_path)
     tally, transcript_tally, overlaps = Counter(), Counter(), []
     covered = text_matches_transcript = 0
@@ -518,6 +665,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=_paraphrase_threshold,
         default=DEFAULT_PARAPHRASE_THRESHOLD,
     )
+    score.add_argument("--by-account", action="store_true")
+    score.add_argument("--client", type=_non_empty)
 
     blind = subparsers.add_parser("blind")
     blind.add_argument("db")
@@ -564,7 +713,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     if args.command == "score":
-        cmd_score(args.db, args.paraphrase_threshold)
+        if args.client and not args.by_account:
+            raise SystemExit("--client currently applies to `score --by-account`.")
+        cmd_score(args.db, args.paraphrase_threshold, args.by_account, args.client)
         return 0
     if args.command == "blind":
         cmd_blind(args.db, args.n, args.out, run_id=args.run_id)

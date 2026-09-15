@@ -40,6 +40,73 @@ def _insert_unit(conn, unit_id, post_id, claim, text, topic="General"):
     )
 
 
+def _make_account_score_db(tmp_path: Path) -> str:
+    db_path = str(tmp_path / "account_score.duckdb")
+    conn = duckdb.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE creator_accounts (
+            account_id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE posts (
+            post_id TEXT PRIMARY KEY,
+            client_id TEXT,
+            account_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE client_posts (
+            client_id TEXT,
+            post_id TEXT,
+            added_at TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE message_units (
+            unit_id TEXT,
+            post_id TEXT,
+            claim TEXT,
+            text TEXT,
+            topic TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE transcripts (
+            post_id TEXT,
+            transcript TEXT
+        )
+        """
+    )
+    conn.close()
+    return db_path
+
+
+def _insert_account_post(conn, client_id, account_id, username, post_id):
+    conn.execute(
+        "INSERT OR IGNORE INTO creator_accounts VALUES (?, ?)",
+        [account_id, username],
+    )
+    conn.execute(
+        "INSERT INTO posts VALUES (?, ?, ?)",
+        [post_id, client_id, account_id],
+    )
+    conn.execute(
+        "INSERT INTO client_posts VALUES (?, ?, CURRENT_TIMESTAMP)",
+        [client_id, post_id],
+    )
+
+
 def test_load_left_joins_transcripts(tmp_path):
     from tools.score_extraction import load
 
@@ -153,6 +220,154 @@ def test_score_summary_uses_transcript_coverage_denominator(tmp_path, capsys):
     assert "transcript coverage 2/3" in out
     assert "LIFTED                    1/2" in out
     assert "text matches source       1/2" in out
+
+
+def _line_for_account(out: str, username: str) -> str:
+    return next(line for line in out.splitlines() if f"@{username}" in line)
+
+
+def _account_columns(out: str, username: str) -> list[str]:
+    return _line_for_account(out, username).split()
+
+
+def test_score_by_account_reports_flags_and_sorts_cleanest_first(tmp_path, capsys):
+    from tools.score_extraction import cmd_score
+
+    db_path = _make_account_score_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_account_post(conn, "client_a", "acc_clean", "clean_creator", "clean_1")
+    _insert_account_post(conn, "client_a", "acc_clean", "clean_creator", "clean_2")
+    _insert_account_post(conn, "client_a", "acc_bad", "bad_creator", "bad_1")
+    _insert_account_post(conn, "client_a", "acc_empty", "empty_creator", "empty_1")
+    _insert_unit(
+        conn,
+        "clean_u1",
+        "clean_1",
+        "Specific metrics make resume bullets easier to judge",
+        "Use numbers in resume bullets so recruiters see evidence",
+    )
+    _insert_unit(
+        conn,
+        "clean_u2",
+        "clean_2",
+        "Follow-up emails should add context instead of repeating thanks",
+        "Send interview follow-ups with a useful detail from the conversation",
+    )
+    _insert_unit(
+        conn,
+        "copied_u",
+        "bad_1",
+        "Use explicit salary evidence before asking for a raise",
+        "Use explicit salary evidence before asking for a raise",
+    )
+    _insert_unit(
+        conn,
+        "paraphrase_u",
+        "bad_1",
+        "Cracks in life come from living fully, not from failure.",
+        "Careers crack, confidence cracks, relationship crack. Not because you failed, but because you lived.",
+    )
+    _insert_unit(
+        conn,
+        "vague_u",
+        "bad_1",
+        "This demonstrates important effective valuable insights for professionals",
+        "Specific salary negotiation scripts require numbers",
+    )
+    _insert_unit(
+        conn,
+        "lifted_u",
+        "bad_1",
+        "Portfolio projects prove practical skill",
+        "Show work samples during the hiring process",
+    )
+    conn.execute(
+        """
+        INSERT INTO transcripts VALUES
+        ('clean_1', 'interview preparation requires concrete examples and calm delivery'),
+        ('clean_2', 'follow up with one useful detail after the interview'),
+        ('bad_1', 'portfolio projects prove practical skill during hiring')
+        """
+    )
+    conn.close()
+
+    cmd_score(db_path, by_account=True, client_id="client_a")
+    out = capsys.readouterr().out
+
+    assert out.index("@clean_creator") < out.index("@bad_creator") < out.index("@empty_creator")
+    assert _account_columns(out, "clean_creator") == [
+        "@clean_creator",
+        "2",
+        "2",
+        "1.00",
+        "100.0%",
+        "0.0%",
+        "0.0%",
+        "0.0%",
+        "0.0%",
+    ]
+    assert _account_columns(out, "bad_creator") == [
+        "@bad_creator",
+        "4",
+        "1",
+        "4.00",
+        "0.0%",
+        "25.0%",
+        "25.0%",
+        "25.0%",
+        "25.0%",
+    ]
+    empty_columns = _account_columns(out, "empty_creator")
+    assert empty_columns[:4] == ["@empty_creator", "0", "1", "0.00"]
+    assert empty_columns[4:] == ["no", "data", "no", "data", "no", "data", "no", "data", "no", "data"]
+    assert "0.0%" not in _line_for_account(out, "empty_creator")
+
+
+def test_score_by_account_scopes_to_client_posts(tmp_path, capsys):
+    from tools.score_extraction import cmd_score
+
+    db_path = _make_account_score_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_account_post(conn, "client_a", "acc_a", "client_a_creator", "a_post")
+    _insert_account_post(conn, "client_b", "acc_b", "client_b_creator", "b_post")
+    _insert_unit(
+        conn,
+        "a_unit",
+        "a_post",
+        "Specific metrics make resume bullets easier to judge",
+        "Use numbers in resume bullets so recruiters see evidence",
+    )
+    _insert_unit(
+        conn,
+        "b_unit",
+        "b_post",
+        "Use explicit salary evidence before asking for a raise",
+        "Use explicit salary evidence before asking for a raise",
+    )
+    conn.execute(
+        """
+        INSERT INTO transcripts VALUES
+        ('a_post', 'interview preparation requires concrete examples'),
+        ('b_post', 'Use explicit salary evidence before asking for a raise')
+        """
+    )
+    conn.close()
+
+    cmd_score(db_path, by_account=True, client_id="client_a")
+    out = capsys.readouterr().out
+
+    assert "@client_a_creator" in out
+    assert "@client_b_creator" not in out
+    assert "b_unit" not in out
+
+
+def test_score_by_account_requires_client(tmp_path):
+    from tools.score_extraction import cmd_score
+
+    db_path = _make_account_score_db(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cmd_score(db_path, by_account=True)
+    assert "--client CLIENT" in str(exc.value)
 
 
 def test_blind_writes_transcript_excerpt(tmp_path):
@@ -716,6 +931,28 @@ class TestTheCliCarriesFlagsThroughToTheCommands:
         tallied = TestParaphraseThresholdFlag._flags_tallied
         assert "PARAPHRASE" in tallied(permissive.stdout), permissive.stdout
         assert "PARAPHRASE" not in tallied(strict.stdout), strict.stdout
+
+    def test_score_by_account_flag_reaches_the_account_report(self, tmp_path):
+        db_path = _make_account_score_db(tmp_path)
+        conn = duckdb.connect(db_path)
+        _insert_account_post(conn, "client_a", "acc_cli", "cli_creator", "cli_post")
+        _insert_unit(
+            conn,
+            "cli_unit",
+            "cli_post",
+            "Specific metrics make resume bullets easier to judge",
+            "Use numbers in resume bullets so recruiters see evidence",
+        )
+        conn.close()
+
+        result = self._run(
+            ["score", db_path, "--by-account", "--client", "client_a"],
+            self._root(),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Extraction quality by account" in result.stdout
+        assert "@cli_creator" in result.stdout
 
     def test_run_id_on_score_names_blind_rather_than_just_refusing(self, tmp_path):
         result = self._run(["score", "reels.duckdb", "--run-id", "x"], self._root())
