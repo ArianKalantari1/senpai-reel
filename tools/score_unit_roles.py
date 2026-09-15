@@ -21,6 +21,7 @@ import csv
 import json
 import random
 import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,13 @@ import requests
 
 sys.path.insert(0, __file__.rsplit("/tools/", 1)[0])
 
+from analysis.extraction import (  # noqa: E402
+    _RATE_LIMIT_ATTEMPTS,
+    _openai_error_code,
+    _retry_after_seconds,
+    OutOfCreditError,
+    RateLimitedError,
+)
 from analysis.unit_role import (  # noqa: E402
     UNIT_ROLES,
     role_from_rules,
@@ -204,17 +212,44 @@ def _cost_from_usage(usage: dict[str, Any] | None) -> float | None:
 
 
 def _call_model(unit: UnitCandidate, api_key: str) -> ModelVerdict:
-    response = requests.post(
-        OPENAI_CHAT_COMPLETIONS_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": MODEL,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": _model_messages(unit),
-        },
-        timeout=60,
-    )
+    """One classification call, with the same 429 split as extraction.
+
+    OpenAI answers both "slow down" and "you have no money" with 429. The
+    classification here reuses analysis/extraction.py rather than repeating
+    it, so the two spending paths cannot drift apart: a transient limit is
+    retried, an exhausted balance fails immediately and says so. Without this,
+    a run that hits either one dies on a raw HTTPError traceback partway
+    through a paid loop.
+    """
+    for attempt in range(_RATE_LIMIT_ATTEMPTS):
+        response = requests.post(
+            OPENAI_CHAT_COMPLETIONS_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": MODEL,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": _model_messages(unit),
+            },
+            timeout=60,
+        )
+        if response.status_code != 429:
+            break
+        code = _openai_error_code(response)
+        if "quota" in code or "credit" in code:
+            raise OutOfCreditError(
+                "OpenAI rejected the request: no credit remaining on the account.\n"
+                "Add credit at https://platform.openai.com/settings/organization/billing/\n"
+                "then re-run."
+            )
+        if attempt == _RATE_LIMIT_ATTEMPTS - 1:
+            raise RateLimitedError(
+                f"Rate limited by OpenAI after {_RATE_LIMIT_ATTEMPTS} attempts. "
+                "Wait a minute and re-run — the sample seed is stable, so the "
+                "same units are drawn again."
+            )
+        time.sleep(_retry_after_seconds(response, attempt))
+
     response.raise_for_status()
     payload = response.json()
     raw = payload["choices"][0]["message"]["content"].strip()
@@ -293,9 +328,32 @@ def cmd_blind(
             "rules cannot decide.\n"
         )
 
-    verdicts = {unit.unit_id: _call_model(unit, key) for unit in sample}
-    _write_blind_rows(out, sample)
-    _write_key_rows(out, verdicts)
+    # Written incrementally rather than as a comprehension. Every call in this
+    # loop is money already spent; a comprehension that raises on unit 30 of 60
+    # throws away 29 paid answers and leaves no files behind.
+    verdicts: dict[str, ModelVerdict] = {}
+    stopped_by: Exception | None = None
+    for unit in sample:
+        try:
+            verdicts[unit.unit_id] = _call_model(unit, key)
+        except (OutOfCreditError, RateLimitedError) as exc:
+            stopped_by = exc
+            break
+
+    sample = [unit for unit in sample if unit.unit_id in verdicts]
+    if sample:
+        _write_blind_rows(out, sample)
+        _write_key_rows(out, verdicts)
+
+    if stopped_by is not None:
+        kept = (
+            f"  {len(sample)} unit(s) were classified before it stopped and are "
+            f"saved in {out}.\n  Mark those, or re-run for a full sample once "
+            "the cause is cleared.\n"
+            if sample
+            else "  Nothing was classified, so no files were written.\n"
+        )
+        raise SystemExit(f"\n{stopped_by}\n\n{kept}")
 
     costs = [v.cost_usd for v in verdicts.values() if v.cost_usd is not None]
     print(f"\nWrote {len(sample)} rule-deferred units to {out}")

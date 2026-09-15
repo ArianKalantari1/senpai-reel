@@ -225,6 +225,10 @@ def test_call_model_parses_json_without_live_api(monkeypatch):
     from tools import score_unit_roles
 
     class FakeResponse:
+        # A real requests.Response always carries status_code; the fake needs
+        # it too now that _call_model reads it to tell a 429 from a success.
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
@@ -264,3 +268,147 @@ def test_call_model_parses_json_without_live_api(monkeypatch):
     assert sent["url"] == score_unit_roles.OPENAI_CHAT_COMPLETIONS_URL
     assert sent["headers"]["Authorization"] == "Bearer fake-key"
     assert sent["json"]["model"] == score_unit_roles.MODEL
+
+
+class _Rate429:
+    """A 429 whose error code says which kind of 429 it is."""
+
+    status_code = 429
+    headers = {"Retry-After": "0"}
+
+    def __init__(self, code):
+        self._code = code
+
+    def json(self):
+        return {"error": {"code": self._code}}
+
+    def raise_for_status(self):
+        raise AssertionError("raise_for_status should not be reached for a 429")
+
+
+def _candidate(score_unit_roles):
+    return score_unit_roles.UnitCandidate(
+        unit_id="u1",
+        client_id="c1",
+        text="some transcript text",
+        claim="some claim",
+        content_type="insight",
+        topic="Resume",
+    )
+
+
+def test_out_of_credit_fails_immediately_instead_of_retrying(monkeypatch):
+    """An exhausted balance is not a rate limit.
+
+    Before this, the tool called raise_for_status() and the operator got a raw
+    HTTPError partway through a paid loop, with no indication that the cause
+    was billing rather than a transient limit. That exact traceback happened
+    on a real re-extraction run.
+    """
+    from tools import score_unit_roles
+
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(1)
+        return _Rate429("insufficient_quota")
+
+    monkeypatch.setattr(score_unit_roles.requests, "post", fake_post)
+    monkeypatch.setattr(score_unit_roles.time, "sleep", lambda _s: None)
+
+    with pytest.raises(score_unit_roles.OutOfCreditError, match="no credit remaining"):
+        score_unit_roles._call_model(_candidate(score_unit_roles), "sk-test")
+
+    # One attempt, not four: backing off against a billing wall wastes the
+    # operator's time and never succeeds.
+    assert len(calls) == 1
+
+
+def test_transient_rate_limit_is_retried_then_reported(monkeypatch):
+    from tools import score_unit_roles
+
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(1)
+        return _Rate429("rate_limit_exceeded")
+
+    monkeypatch.setattr(score_unit_roles.requests, "post", fake_post)
+    monkeypatch.setattr(score_unit_roles.time, "sleep", lambda _s: None)
+
+    with pytest.raises(score_unit_roles.RateLimitedError, match="Rate limited"):
+        score_unit_roles._call_model(_candidate(score_unit_roles), "sk-test")
+
+    assert len(calls) == score_unit_roles._RATE_LIMIT_ATTEMPTS
+
+
+def test_a_run_that_runs_out_of_credit_keeps_what_it_paid_for(role_db, tmp_path, monkeypatch):
+    """Dying mid-loop must not throw away answers already bought.
+
+    `blind` pays per unit. The original built the whole verdict map in one
+    comprehension and only then wrote the files, so an exhausted balance on
+    unit 3 of 4 discarded three paid classifications and left nothing on disk.
+    """
+    from tools import score_unit_roles
+
+    for n in range(4):
+        _seed_unit(role_db, f"u{n}", text=f"Some ordinary advice number {n}")
+
+    calls = []
+
+    class _Ok:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": '{"role":"subject","confidence":0.7}'}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+            }
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(1)
+        if len(calls) > 2:
+            return _Rate429("insufficient_quota")
+        return _Ok()
+
+    monkeypatch.setattr(score_unit_roles.requests, "post", fake_post)
+    monkeypatch.setattr(score_unit_roles.time, "sleep", lambda _s: None)
+
+    out = tmp_path / "roles.tsv"
+    with pytest.raises(SystemExit) as exc:
+        score_unit_roles.cmd_blind(role_db, "client_a", 4, str(out), api_key="sk-test")
+
+    message = str(exc.value)
+    assert "no credit remaining" in message, message
+    assert "2 unit(s) were classified" in message, message
+
+    # The two paid answers survived, and the marking file matches them exactly
+    # — a marking file longer than the key would send the operator to mark rows
+    # with no model answer to compare against.
+    assert out.exists()
+    marked_ids = {row[0] for row in _data_lines(out)[1:]}
+    key_ids = {row[0] for row in _data_lines(Path(score_unit_roles._key_path(str(out))))[1:]}
+    assert len(marked_ids) == 2, marked_ids
+    assert marked_ids == key_ids
+
+
+def test_nothing_is_written_when_the_first_call_already_fails(role_db, tmp_path, monkeypatch):
+    from tools import score_unit_roles
+
+    _seed_unit(role_db, "u0", text="Some ordinary advice")
+
+    monkeypatch.setattr(
+        score_unit_roles.requests, "post",
+        lambda url, headers, json, timeout: _Rate429("insufficient_quota"))
+    monkeypatch.setattr(score_unit_roles.time, "sleep", lambda _s: None)
+
+    out = tmp_path / "roles.tsv"
+    with pytest.raises(SystemExit) as exc:
+        score_unit_roles.cmd_blind(role_db, "client_a", 1, str(out), api_key="sk-test")
+
+    assert "Nothing was classified" in str(exc.value)
+    # An empty marking file is worse than none: it reads as a finished sample.
+    assert not out.exists()
