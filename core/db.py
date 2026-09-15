@@ -381,7 +381,8 @@ def init_db():
         source_units TEXT[],
         tokens_used  INTEGER,
         cost_usd     DOUBLE,
-        generation_run_id TEXT
+        generation_run_id TEXT,
+        generation_condition TEXT
     )
     """)
 
@@ -428,8 +429,9 @@ def init_db():
 
     # ── Generation A/B provenance (creative-director-ai #41) ────────────────
     # NULL means legacy/manual generation, not condition B. The A/B harness
-    # writes an explicit run id for both grounded and bare rows.
+    # writes an explicit run id and condition for both grounded and bare rows.
     _add_column_if_missing(conn, "generated_content", "generation_run_id", "TEXT")
+    _add_column_if_missing(conn, "generated_content", "generation_condition", "TEXT")
 
 
     # ── Per-persona taxonomy (creative-director-ai #25) ───────────────────────

@@ -1,3 +1,4 @@
+import csv
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -66,7 +67,7 @@ def _seed_generation_db(tmp_path: Path):
     return db_path, db_mod, old_path
 
 
-def test_generation_run_id_is_nullable_for_legacy_rows(tmp_path):
+def test_generation_ab_columns_are_nullable_for_legacy_rows(tmp_path):
     import core.db as db_mod
 
     old_path = db_mod.DB_PATH
@@ -86,13 +87,17 @@ def test_generation_run_id_is_nullable_for_legacy_rows(tmp_path):
             [db_mod.DEFAULT_CLIENT_ID],
         )
         row = conn.execute(
-            "SELECT generation_run_id FROM generated_content WHERE gen_id = 'legacy'"
+            """
+            SELECT generation_run_id, generation_condition
+            FROM generated_content
+            WHERE gen_id = 'legacy'
+            """
         ).fetchone()
         conn.close()
     finally:
         db_mod.DB_PATH = old_path
 
-    assert row == (None,)
+    assert row == (None, None)
 
 
 def test_run_keeps_conditions_identical_except_reference_units(tmp_path, monkeypatch):
@@ -135,37 +140,71 @@ def test_run_keeps_conditions_identical_except_reference_units(tmp_path, monkeyp
     conn = duckdb.connect(db_path)
     rows = conn.execute(
         """
-        SELECT generation_run_id, topic, content_type, model, source_units, output_text
+        SELECT generation_run_id, generation_condition, topic, content_type, model,
+               source_units, output_text
         FROM generated_content
         WHERE generation_run_id = 'generation-test'
-        ORDER BY created_at, gen_id
+        ORDER BY generation_condition
         """
     ).fetchall()
     conn.close()
 
     assert len(rows) == 2
     assert {row[0] for row in rows} == {"generation-test"}
-    assert {row[1] for row in rows} == {"Resume"}
-    assert {row[2] for row in rows} == {"caption"}
-    assert {row[3] for row in rows} == {"gpt-4o-mini"}
-    assert sorted(row[4] for row in rows) == [[], ["allowed_unit"]]
+    assert [row[1] for row in rows] == ["bare", "grounded"]
+    assert {row[2] for row in rows} == {"Resume"}
+    assert {row[3] for row in rows} == {"caption"}
+    assert {row[4] for row in rows} == {"gpt-4o-mini"}
+    assert [row[5] for row in rows] == [[], ["allowed_unit"]]
 
 
-def _insert_generated_pair(conn, run_id="generation-test"):
+def _insert_generated_pair(
+    conn,
+    *,
+    run_id="generation-test",
+    client_id="jobs_au_demo",
+    grounded_source_units=None,
+    bare_source_units=None,
+    grounded_text="Candidate alpha",
+    bare_text="Candidate beta",
+):
+    grounded_source_units = ["unit_a"] if grounded_source_units is None else grounded_source_units
+    bare_source_units = [] if bare_source_units is None else bare_source_units
     conn.execute(
         """
         INSERT INTO generated_content (
             gen_id, client_id, created_at, topic, content_type, output_text,
-            model, source_units, tokens_used, cost_usd, generation_run_id
+            model, source_units, tokens_used, cost_usd, generation_run_id,
+            generation_condition
         )
         VALUES
-          ('gen_a', 'jobs_au_demo', CURRENT_TIMESTAMP, 'Resume', 'caption',
-           'Candidate alpha', 'gpt-4o-mini', ['unit_a'], 100, 0.010000, ?),
-          ('gen_b', 'jobs_au_demo', CURRENT_TIMESTAMP, 'Resume', 'caption',
-           'Candidate beta', 'gpt-4o-mini', [], 50, 0.002000, ?)
+          (?, ?, CURRENT_TIMESTAMP, 'Resume', 'caption',
+           ?, 'gpt-4o-mini', ?, 100, 0.010000, ?, 'grounded'),
+          (?, ?, CURRENT_TIMESTAMP, 'Resume', 'caption',
+           ?, 'gpt-4o-mini', ?, 50, 0.002000, ?, 'bare')
         """,
-        [run_id, run_id],
+        [
+            f"{client_id}_gen_a",
+            client_id,
+            grounded_text,
+            grounded_source_units,
+            run_id,
+            f"{client_id}_gen_b",
+            client_id,
+            bare_text,
+            bare_source_units,
+            run_id,
+        ],
     )
+
+
+def _condition_by_gen_id(key_text: str) -> dict[str, str]:
+    rows = list(csv.DictReader(key_text.splitlines(), delimiter="\t"))
+    conditions = {}
+    for row in rows:
+        for side in ("left", "right"):
+            conditions[row[f"{side}_gen_id"]] = row[f"{side}_condition"]
+    return conditions
 
 
 def test_blind_file_hides_condition_and_ids_while_key_stores_mapping(tmp_path):
@@ -179,8 +218,8 @@ def test_blind_file_hides_condition_and_ids_while_key_stores_mapping(tmp_path):
     out = tmp_path / "blind.tsv"
     out_again = tmp_path / "blind_again.tsv"
     try:
-        assert sg.cmd_blind(db_path, "generation-test", str(out)) == 0
-        assert sg.cmd_blind(db_path, "generation-test", str(out_again)) == 0
+        assert sg.cmd_blind(db_path, db_mod.DEFAULT_CLIENT_ID, "generation-test", str(out)) == 0
+        assert sg.cmd_blind(db_path, db_mod.DEFAULT_CLIENT_ID, "generation-test", str(out_again)) == 0
     finally:
         db_mod.DB_PATH = old_path
 
@@ -191,15 +230,108 @@ def test_blind_file_hides_condition_and_ids_while_key_stores_mapping(tmp_path):
     assert "pair_id\tPREFERENCE\tleft\tright" in marked
     assert "grounded" not in marked.lower()
     assert "bare" not in marked.lower()
-    assert "gen_a" not in marked
-    assert "gen_b" not in marked
+    assert "jobs_au_demo_gen_a" not in marked
+    assert "jobs_au_demo_gen_b" not in marked
     assert "Candidate alpha" in marked
     assert "Candidate beta" in marked
     assert marked == marked_again
-    assert "grounded" in key
-    assert "bare" in key
-    assert "gen_a" in key
-    assert "gen_b" in key
+    assert _condition_by_gen_id(key) == {
+        "jobs_au_demo_gen_a": "grounded",
+        "jobs_au_demo_gen_b": "bare",
+    }
+
+
+def test_blind_uses_explicit_condition_not_source_units(tmp_path):
+    from tools import score_generation as sg
+
+    db_path, db_mod, old_path = _seed_generation_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_generated_pair(
+        conn,
+        grounded_source_units=[],
+        bare_source_units=["unit_that_must_not_define_condition"],
+    )
+    conn.close()
+
+    out = tmp_path / "blind.tsv"
+    try:
+        assert sg.cmd_blind(db_path, db_mod.DEFAULT_CLIENT_ID, "generation-test", str(out)) == 0
+    finally:
+        db_mod.DB_PATH = old_path
+
+    key = sg._key_path(str(out)).read_text(encoding="utf-8")
+
+    assert _condition_by_gen_id(key) == {
+        "jobs_au_demo_gen_a": "grounded",
+        "jobs_au_demo_gen_b": "bare",
+    }
+
+
+def test_blind_scopes_generation_run_to_client(tmp_path):
+    from tools import score_generation as sg
+
+    db_path, db_mod, old_path = _seed_generation_db(tmp_path)
+    other_client = "other_client"
+    conn = duckdb.connect(db_path)
+    _insert_generated_pair(conn, client_id=db_mod.DEFAULT_CLIENT_ID)
+    _insert_generated_pair(
+        conn,
+        client_id=other_client,
+        grounded_text="Other client alpha",
+        bare_text="Other client beta",
+    )
+    conn.close()
+
+    out = tmp_path / "blind.tsv"
+    try:
+        assert sg.cmd_blind(db_path, db_mod.DEFAULT_CLIENT_ID, "generation-test", str(out)) == 0
+    finally:
+        db_mod.DB_PATH = old_path
+
+    marked = out.read_text(encoding="utf-8")
+    key = sg._key_path(str(out)).read_text(encoding="utf-8")
+
+    assert "Candidate alpha" in marked
+    assert "Candidate beta" in marked
+    assert "Other client alpha" not in marked
+    assert "Other client beta" not in marked
+    assert "other_client_gen_a" not in key
+    assert "other_client_gen_b" not in key
+
+
+def test_blind_rejects_run_without_one_of_each_condition(tmp_path):
+    from tools import score_generation as sg
+
+    db_path, db_mod, old_path = _seed_generation_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO generated_content (
+            gen_id, client_id, created_at, topic, content_type, output_text,
+            model, source_units, tokens_used, cost_usd, generation_run_id,
+            generation_condition
+        )
+        VALUES
+          ('gen_a', ?, CURRENT_TIMESTAMP, 'Resume', 'caption',
+           'Candidate alpha', 'gpt-4o-mini', ['unit_a'], 100, 0.010000,
+           'generation-test', 'grounded'),
+          ('gen_b', ?, CURRENT_TIMESTAMP, 'Resume', 'caption',
+           'Candidate beta', 'gpt-4o-mini', [], 50, 0.002000,
+           'generation-test', 'grounded')
+        """,
+        [db_mod.DEFAULT_CLIENT_ID, db_mod.DEFAULT_CLIENT_ID],
+    )
+    conn.close()
+
+    try:
+        try:
+            sg.cmd_blind(db_path, db_mod.DEFAULT_CLIENT_ID, "generation-test", str(tmp_path / "blind.tsv"))
+        except SystemExit as exc:
+            assert "not pair-complete" in str(exc)
+        else:
+            raise AssertionError("cmd_blind should reject an unbalanced generation condition set")
+    finally:
+        db_mod.DB_PATH = old_path
 
 
 def test_compare_reports_small_sample_and_per_condition_cost(tmp_path, capsys):
