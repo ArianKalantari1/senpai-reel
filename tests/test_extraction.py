@@ -320,3 +320,77 @@ class TestSaveMessageUnits:
         from analysis.extraction import save_message_units
         # Should not raise
         save_message_units([])
+
+
+class TestRateLimitVersusNoCredit:
+    """OpenAI returns 429 for two unrelated things and they need opposite handling.
+
+    A real run hit `insufficient_quota` / `credit_balance_exhausted` and died
+    with a raw `raise_for_status()` traceback. Backing off against an empty
+    credit balance just delays the same answer; not backing off against a real
+    rate limit throws away a run for a blip that clears in seconds. The `code`
+    field is what separates them.
+    """
+
+    @staticmethod
+    def _resp(status, code=None, headers=None):
+        r = MagicMock()
+        r.status_code = status
+        r.headers = headers or {}
+        r.json.return_value = {"error": {"code": code}} if code else {}
+        return r
+
+    def test_no_credit_fails_immediately_with_an_actionable_message(self):
+        from analysis.extraction import extract_message_units, OutOfCreditError
+        resp = self._resp(429, "credit_balance_exhausted")
+        with patch("analysis.extraction.requests.post", return_value=resp) as post:
+            with patch("analysis.extraction.time.sleep") as slept:
+                with pytest.raises(OutOfCreditError) as exc:
+                    extract_message_units("a transcript long enough to extract", "p1", "k")
+        # One call, no waiting. Retrying an empty balance is pure delay.
+        assert post.call_count == 1
+        assert slept.call_count == 0
+        assert "billing" in str(exc.value)
+
+    def test_insufficient_quota_code_is_also_treated_as_permanent(self):
+        from analysis.extraction import extract_message_units, OutOfCreditError
+        resp = self._resp(429, "insufficient_quota")
+        with patch("analysis.extraction.requests.post", return_value=resp) as post:
+            with pytest.raises(OutOfCreditError):
+                extract_message_units("a transcript long enough to extract", "p1", "k")
+        assert post.call_count == 1
+
+    def test_a_real_rate_limit_is_retried_then_gives_up_clearly(self):
+        from analysis.extraction import extract_message_units, RateLimitedError
+        resp = self._resp(429, "rate_limit_exceeded")
+        with patch("analysis.extraction.requests.post", return_value=resp) as post:
+            with patch("analysis.extraction.time.sleep") as slept:
+                with pytest.raises(RateLimitedError):
+                    extract_message_units("a transcript long enough to extract", "p1", "k")
+        assert post.call_count > 1, "a transient 429 must be retried"
+        assert slept.call_count == post.call_count - 1
+
+    def test_a_rate_limit_that_clears_succeeds_without_the_caller_knowing(self):
+        from analysis.extraction import extract_message_units
+        limited = self._resp(429, "rate_limit_exceeded")
+        ok = MagicMock()
+        ok.status_code = 200
+        ok.headers = {}
+        ok.json.return_value = {
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            "choices": [{"message": {"content": json.dumps({"units": []})}}],
+        }
+        with patch("analysis.extraction.requests.post", side_effect=[limited, ok]):
+            with patch("analysis.extraction.time.sleep"):
+                units, cost = extract_message_units("a transcript long enough to be extracted from", "p1", "k")
+        assert units == []
+        assert cost > 0
+
+    def test_retry_after_header_is_honoured(self):
+        from analysis.extraction import _retry_after_seconds
+        resp = MagicMock()
+        resp.headers = {"Retry-After": "7"}
+        # The API knows better than our backoff curve when it tells us.
+        assert _retry_after_seconds(resp, attempt=0) == 7.0
+        resp.headers = {}
+        assert _retry_after_seconds(resp, attempt=0) > 0

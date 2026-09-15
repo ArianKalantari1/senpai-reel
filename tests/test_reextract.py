@@ -332,3 +332,135 @@ def test_compare_prints_old_and_new_units_as_independent_lists(tmp_path, capsys)
     assert "new_unit" in out
     assert "old claim" in out
     assert "new claim" in out
+
+
+def _seed_resumable_db(tmp_path, n=5, client="acme"):
+    import core.db as db_mod
+    old = db_mod.DB_PATH
+    db_mod.DB_PATH = str(tmp_path / "resume.duckdb")
+    db_mod.init_db()
+    path = db_mod.DB_PATH
+    now = datetime.utcnow()
+    conn = duckdb.connect(path)
+    for i in range(n):
+        pid = f"p{i}"
+        conn.execute(
+            "INSERT INTO posts (post_id, client_id, account_id, scraped_at, hashtags, mentions)"
+            " VALUES (?,?,'acct',?,[],[])", [pid, client, now])
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?,?,?)",
+            [client, pid, now])
+        conn.execute(
+            "INSERT INTO transcripts (post_id, client_id, provider, model, transcript,"
+            " language, confidence, duration_sec, word_count, transcribed_at, cost_usd)"
+            " VALUES (?,?,'dg','n2',?,'en',0.9,30,7,?,0.001)",
+            [pid, client, f"transcript for {pid}, long enough to extract from", now])
+        conn.execute(
+            "INSERT INTO message_units (unit_id, client_id, post_id, text, claim, topic,"
+            " content_type, confidence, extracted_at, model)"
+            " VALUES (?,?,?,'old text','old claim','careers','tip',0.9,?,'m')",
+            [f"old{i}", client, pid, now])
+    conn.close()
+    return path, db_mod, old, client
+
+
+class TestAPartlyFinishedRunCanBeFinished:
+    """A 429 on one call must not cost a whole validation round.
+
+    Units are saved per post inside the loop, so a run that dies at post 3
+    leaves two posts written. Before --resume, re-running the same id hit the
+    duplicate guard: the run could not be finished and could not be restarted
+    under the name its sample was drawn for. The id was burned.
+    """
+
+    def _rx(self):
+        import importlib.util, pathlib, sys
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("rx2", root / "tools" / "reextract.py")
+        m = importlib.util.module_from_spec(spec); sys.modules["rx2"] = m
+        spec.loader.exec_module(m)
+        return m
+
+    @staticmethod
+    def _unit_for(post_id, run_id):
+        from analysis.extraction import MessageUnit
+        import uuid as _u
+        return MessageUnit(
+            unit_id=str(_u.uuid4()), post_id=post_id, text="new", claim="new claim",
+            advice=None, topic="careers", subtopic=None, content_type="insight",
+            confidence=0.9, extraction_run_id=run_id, prompt_version="sha256:test",
+            extracted_at=datetime.utcnow(), model="m")
+
+    def _run_dying_at(self, rx, path, client, die_on):
+        from analysis.extraction import RateLimitedError
+        calls = {"n": 0}
+
+        def flaky(transcript, post_id, key, client_id="demo", model="m", extraction_run_id=None):
+            calls["n"] += 1
+            if calls["n"] == die_on:
+                raise RateLimitedError("simulated")
+            return [self._unit_for(post_id, extraction_run_id)], 0.0001
+
+        rx.extract_message_units = flaky
+        with pytest.raises(RateLimitedError):
+            rx.cmd_run(path, 5, "RUN-A", dry_run=False, client_id=client, api_key="k")
+
+    def test_resume_finishes_the_run_without_writing_anything_twice(self, tmp_path, capsys):
+        rx = self._rx()
+        path, db_mod, old, client = _seed_resumable_db(tmp_path)
+        try:
+            self._run_dying_at(rx, path, client, die_on=3)
+            conn = duckdb.connect(path)
+            partial = conn.execute(
+                "SELECT COUNT(DISTINCT post_id) FROM message_units"
+                " WHERE extraction_run_id = 'RUN-A'").fetchone()[0]
+            conn.close()
+            assert partial == 2, "fixture must actually leave a partial run"
+
+            rx.extract_message_units = lambda t, pid, k, client_id="demo", model="m", extraction_run_id=None: (
+                [self._unit_for(pid, extraction_run_id)], 0.0001)
+            assert rx.cmd_run(path, 5, "RUN-A", dry_run=False,
+                              client_id=client, api_key="k", resume=True) == 0
+
+            conn = duckdb.connect(path)
+            done = conn.execute(
+                "SELECT COUNT(DISTINCT post_id) FROM message_units"
+                " WHERE extraction_run_id = 'RUN-A'").fetchone()[0]
+            worst = conn.execute(
+                "SELECT MAX(n) FROM (SELECT post_id, COUNT(*) n FROM message_units"
+                " WHERE extraction_run_id = 'RUN-A' GROUP BY post_id)").fetchone()[0]
+            originals = conn.execute(
+                "SELECT COUNT(*) FROM message_units WHERE extraction_run_id IS NULL").fetchone()[0]
+            conn.close()
+            assert done == 5, "resume must finish every selected post"
+            assert worst == 1, "a resumed post must not be written twice"
+            assert originals == 5, "originals must be untouched"
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_same_run_id_without_resume_is_still_refused(self, tmp_path):
+        rx = self._rx()
+        path, db_mod, old, client = _seed_resumable_db(tmp_path)
+        try:
+            self._run_dying_at(rx, path, client, die_on=3)
+            with pytest.raises(SystemExit) as exc:
+                rx.cmd_run(path, 5, "RUN-A", dry_run=False, client_id=client, api_key="k")
+            # Refusing by default is deliberate: silently appending to an
+            # existing run would mix two prompt versions under one id.
+            assert "--resume" in str(exc.value)
+        finally:
+            db_mod.DB_PATH = old
+
+    def test_resuming_a_finished_run_does_nothing_and_says_so(self, tmp_path, capsys):
+        rx = self._rx()
+        path, db_mod, old, client = _seed_resumable_db(tmp_path)
+        try:
+            rx.extract_message_units = lambda t, pid, k, client_id="demo", model="m", extraction_run_id=None: (
+                [self._unit_for(pid, extraction_run_id)], 0.0001)
+            rx.cmd_run(path, 5, "RUN-A", dry_run=False, client_id=client, api_key="k")
+            capsys.readouterr()
+            assert rx.cmd_run(path, 5, "RUN-A", dry_run=False,
+                              client_id=client, api_key="k", resume=True) == 0
+            assert "Nothing to do" in capsys.readouterr().out
+        finally:
+            db_mod.DB_PATH = old

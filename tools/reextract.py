@@ -118,6 +118,24 @@ def _run_id_exists(conn, run_id: str) -> bool:
     )
 
 
+def _posts_already_done(conn, run_id: str) -> set[str]:
+    """Posts that already have units under this run id.
+
+    Units are saved per post inside the loop, so a run that dies at post 12
+    leaves eleven posts written. Without this, re-running the same id hits the
+    duplicate guard and the id is burned: the run cannot be finished and
+    cannot be restarted under the name the sample was drawn for. A 429 on one
+    call should not cost a whole validation round.
+    """
+    return {
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT post_id FROM message_units WHERE extraction_run_id = ?",
+            [run_id],
+        ).fetchall()
+    }
+
+
 def cmd_run(
     db_path: str,
     posts: int,
@@ -126,6 +144,7 @@ def cmd_run(
     dry_run: bool,
     client_id: str,
     api_key: str | None = None,
+    resume: bool = False,
 ) -> int:
     if posts < 1:
         raise SystemExit("--posts must be at least 1")
@@ -134,20 +153,39 @@ def cmd_run(
     conn = _connect(db_path, read_only=dry_run)
     try:
         _require_schema(conn, db_path)
-        if _run_id_exists(conn, run_id):
+        already_done = _posts_already_done(conn, run_id)
+        if already_done and not resume:
             raise SystemExit(
-                f"\n  extraction_run_id {run_id!r} already exists. Pick a new --run-id.\n"
+                f"\n  extraction_run_id {run_id!r} already has units for "
+                f"{len(already_done)} post(s).\n\n"
+                "  If a previous run stopped part-way, finish it with --resume "
+                "and the same\n  --run-id: the posts already done are skipped and "
+                "nothing is written twice.\n"
+                "  Otherwise pick a new --run-id.\n"
             )
         rows = _select_posts(conn, client_id, posts)
     finally:
         conn.close()
+
+    # The sample is seeded, so --resume re-draws exactly the same posts and the
+    # completed ones fall out here. Skipping by post_id rather than by count
+    # means it stays correct even if the corpus grew between attempts.
+    skipped = [r for r in rows if r[0] in already_done]
+    rows = [r for r in rows if r[0] not in already_done]
 
     with _using_db_path(db_path):
         prompt_version = prompt_version_for_client(client_id)
 
     print(f"\nreextract run {run_id!r} — client {client_id}")
     print(f"Prompt version: {prompt_version}")
+    if skipped:
+        print(f"Resuming: {len(skipped)} post(s) already done, {len(rows)} still to do.")
     print(f"Selected posts: {len(rows)}/{posts}\n")
+
+    if not rows:
+        print(f"Nothing to do — every selected post already has units under "
+              f"{run_id!r}.\n")
+        return 0
     for post_id, _transcript, existing_units in rows:
         print(f"  {post_id}: {existing_units} existing unit(s)")
 
@@ -264,6 +302,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--posts", type=int, required=True)
     run.add_argument("--run-id", default=None)
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue a run that stopped part-way, skipping posts already done",
+    )
     run.add_argument("--client", default=DEFAULT_CLIENT_ID)
     run.add_argument("--api-key", default=None)
 
@@ -281,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             client_id=args.client,
             api_key=args.api_key,
+            resume=args.resume,
         )
     if args.command == "compare":
         return cmd_compare(args.db, args.run_id, client_id=args.client)
