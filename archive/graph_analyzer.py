@@ -1,6 +1,5 @@
 import json
 import duckdb
-import networkx as nx
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
@@ -8,7 +7,39 @@ from datetime import datetime, timedelta
 import re
 from collections import Counter, defaultdict
 
-from core.db import DEFAULT_CLIENT_ID
+from core.db import DEFAULT_CLIENT_ID, engagement_rate_of, opt_number
+
+try:
+    import networkx as nx
+except ModuleNotFoundError:
+    nx = None
+
+
+def _optional_graph_dependencies():
+    if nx is None:
+        raise ImportError(
+            "archive/graph_analyzer.py needs optional graph dependencies. "
+            "Install requirements-optional.txt before running it."
+        )
+
+
+def post_metrics_from_raw(data):
+    likes = opt_number(data.get('likesCount'), int)
+    views = opt_number(data.get('videoViewCount'), int)
+    duration = opt_number(data.get('videoDuration'), float)
+    return {
+        'likes': likes,
+        'views': views,
+        'duration': duration,
+        'engagement_rate': engagement_rate_of(likes, views),
+    }
+
+
+def known_average(values):
+    known = [value for value in values if value is not None]
+    if not known:
+        return None
+    return sum(known) / len(known)
 
 class InstagramGraphAnalyzer:
     """
@@ -17,6 +48,7 @@ class InstagramGraphAnalyzer:
     """
     
     def __init__(self, db_path="reels.duckdb", client_id=DEFAULT_CLIENT_ID):
+        _optional_graph_dependencies()
         self.conn = duckdb.connect(db_path)
         self.client_id = client_id
         self.graph = nx.Graph()
@@ -48,6 +80,7 @@ class InstagramGraphAnalyzer:
                 
                 caption = data.get('caption', '') or ''
                 hashtags, mentions = self.extract_hashtags_mentions(caption)
+                metrics = post_metrics_from_raw(data)
                 
                 post_data = {
                     'short_code': data.get('shortCode', ''),
@@ -56,13 +89,14 @@ class InstagramGraphAnalyzer:
                     'hashtags': hashtags,
                     'mentions': mentions,
                     'location': data.get('locationName', ''),
-                    'likes': data.get('likesCount', 0) or 0,
-                    'views': data.get('videoViewCount', 0) or 0,
+                    'likes': metrics['likes'],
+                    'views': metrics['views'],
                     'timestamp': data.get('timestamp', ''),
-                    'duration': data.get('videoDuration', 0) or 0
+                    'duration': metrics['duration'],
+                    'engagement_rate': metrics['engagement_rate'],
                 }
                 posts.append(post_data)
-            except:
+            except (TypeError, json.JSONDecodeError):
                 continue
         
         # Add nodes (posts)
@@ -73,7 +107,7 @@ class InstagramGraphAnalyzer:
                 owner=post['owner'],
                 likes=post['likes'],
                 views=post['views'],
-                engagement_rate=(post['likes']/post['views']*100) if post['views'] > 0 else 0,
+                engagement_rate=post['engagement_rate'],
                 hashtags=len(post['hashtags']),
                 mentions=len(post['mentions']),
                 has_location=bool(post['location'])
@@ -108,13 +142,15 @@ class InstagramGraphAnalyzer:
             score += 0.3 * (len(common_hashtags) / max(len(post1['hashtags']), len(post2['hashtags']), 1))
         
         # Similar engagement patterns
-        eng1 = (post1['likes']/post1['views']*100) if post1['views'] > 0 else 0
-        eng2 = (post2['likes']/post2['views']*100) if post2['views'] > 0 else 0
-        if abs(eng1 - eng2) < 5:  # Similar engagement rates
+        eng1 = post1.get('engagement_rate')
+        eng2 = post2.get('engagement_rate')
+        if eng1 is not None and eng2 is not None and abs(eng1 - eng2) < 5:
             score += 0.2
         
         # Similar duration
-        if abs(post1['duration'] - post2['duration']) < 10:  # Within 10 seconds
+        duration1 = post1.get('duration')
+        duration2 = post2.get('duration')
+        if duration1 is not None and duration2 is not None and abs(duration1 - duration2) < 10:
             score += 0.1
         
         # Cross-mentions
@@ -138,15 +174,15 @@ class InstagramGraphAnalyzer:
         
         # Add hashtag nodes
         for hashtag, related_posts in popular_hashtags.items():
-            total_engagement = sum((p['likes']/p['views']*100) if p['views'] > 0 else 0 for p in related_posts)
-            avg_engagement = total_engagement / len(related_posts)
+            avg_engagement = known_average(p.get('engagement_rate') for p in related_posts)
+            known_likes = [p['likes'] for p in related_posts if p.get('likes') is not None]
             
             hashtag_graph.add_node(
                 hashtag,
                 node_type='hashtag',
                 post_count=len(related_posts),
                 avg_engagement=avg_engagement,
-                total_likes=sum(p['likes'] for p in related_posts)
+                total_likes=sum(known_likes) if known_likes else None,
             )
         
         # Create edges between hashtags that co-occur
@@ -173,13 +209,20 @@ class InstagramGraphAnalyzer:
         user_graph = nx.DiGraph()  # Directed graph for influence
         
         # Collect user data
-        user_data = defaultdict(lambda: {'posts': 0, 'total_likes': 0, 'total_views': 0, 'mentioned_by': []})
+        user_data = defaultdict(lambda: {
+            'posts': 0,
+            'likes': [],
+            'views': [],
+            'mentioned_by': [],
+        })
         
         for post in posts:
             owner = post['owner']
             user_data[owner]['posts'] += 1
-            user_data[owner]['total_likes'] += post['likes']
-            user_data[owner]['total_views'] += post['views']
+            if post.get('likes') is not None:
+                user_data[owner]['likes'].append(post['likes'])
+            if post.get('views') is not None:
+                user_data[owner]['views'].append(post['views'])
             
             # Track who mentions whom
             for mention in post['mentions']:
@@ -188,8 +231,14 @@ class InstagramGraphAnalyzer:
         
         # Add user nodes
         for user, data in user_data.items():
-            avg_engagement = (data['total_likes']/data['total_views']*100) if data['total_views'] > 0 else 0
-            influence_score = data['posts'] * avg_engagement * 0.01  # Simple influence metric
+            total_likes = sum(data['likes']) if data['likes'] else None
+            total_views = sum(data['views']) if data['views'] else None
+            avg_engagement = engagement_rate_of(total_likes, total_views)
+            influence_score = (
+                data['posts'] * avg_engagement * 0.01
+                if avg_engagement is not None
+                else None
+            )
             
             user_graph.add_node(
                 user,
@@ -267,20 +316,41 @@ class InstagramGraphAnalyzer:
             largest_cluster = max(communities.values(), key=len)
             if len(largest_cluster) > 1:
                 cluster_posts = [p for p in posts if p['short_code'] in largest_cluster]
-                avg_engagement = sum((p['likes']/p['views']*100) if p['views'] > 0 else 0 for p in cluster_posts) / len(cluster_posts)
-                insights.append(f"🎯 Your largest content cluster has {len(largest_cluster)} posts with {avg_engagement:.1f}% avg engagement")
+                avg_engagement = known_average(p.get('engagement_rate') for p in cluster_posts)
+                if avg_engagement is None:
+                    insights.append(
+                        f"🎯 Your largest content cluster has {len(largest_cluster)} posts with unknown avg engagement"
+                    )
+                else:
+                    insights.append(
+                        f"🎯 Your largest content cluster has {len(largest_cluster)} posts with {avg_engagement:.1f}% avg engagement"
+                    )
         
         # Hashtag insights
         if hashtag_graph.nodes:
-            hashtag_metrics = [(node, data['avg_engagement']) for node, data in hashtag_graph.nodes(data=True)]
-            best_hashtag = max(hashtag_metrics, key=lambda x: x[1])
-            insights.append(f"🏷️ Most effective hashtag: {best_hashtag[0]} ({best_hashtag[1]:.1f}% avg engagement)")
+            hashtag_metrics = [
+                (node, data['avg_engagement'])
+                for node, data in hashtag_graph.nodes(data=True)
+                if data['avg_engagement'] is not None
+            ]
+            if hashtag_metrics:
+                best_hashtag = max(hashtag_metrics, key=lambda x: x[1])
+                insights.append(f"🏷️ Most effective hashtag: {best_hashtag[0]} ({best_hashtag[1]:.1f}% avg engagement)")
+            else:
+                insights.append("🏷️ Most effective hashtag: unknown (no known engagement rates)")
         
         # User influence insights
         if user_graph.nodes:
-            influence_metrics = [(node, data['influence_score']) for node, data in user_graph.nodes(data=True)]
-            top_influencer = max(influence_metrics, key=lambda x: x[1])
-            insights.append(f"👑 Most influential account: @{top_influencer[0]} (influence score: {top_influencer[1]:.1f})")
+            influence_metrics = [
+                (node, data['influence_score'])
+                for node, data in user_graph.nodes(data=True)
+                if data['influence_score'] is not None
+            ]
+            if influence_metrics:
+                top_influencer = max(influence_metrics, key=lambda x: x[1])
+                insights.append(f"👑 Most influential account: @{top_influencer[0]} (influence score: {top_influencer[1]:.1f})")
+            else:
+                insights.append("👑 Most influential account: unknown (no known engagement rates)")
         
         # Network density insight
         network_metrics = self.analyze_network_metrics()
