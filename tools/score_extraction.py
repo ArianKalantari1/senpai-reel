@@ -19,10 +19,13 @@ KNOWN GAPS:
     score_extraction.py blind <db> [n] [out] [--run-id NAME]
                                                 write n units for human marking
     score_extraction.py compare <marked.tsv> [db]  agreement between you and it
+    score_extraction.py duplicates <db> --client CLIENT
+                                                measure repeated extracted claims
 
   --paraphrase-threshold <0..1> retunes the PARAPHRASE cut-off for `score` and
-  `compare` without editing code. See DEFAULT_PARAPHRASE_THRESHOLD for how the
-  shipped value was calibrated and what a larger marked sample should change.
+  `compare` and the duplicate-claim cut-off for `duplicates` without editing
+  code. See DEFAULT_PARAPHRASE_THRESHOLD for how the shipped value was
+  calibrated and what a larger marked sample should change.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ import argparse
 import re
 import sys
 from collections import Counter
+from time import perf_counter
 
 TOKEN = re.compile(r"[a-z0-9']+")
 
@@ -121,6 +125,44 @@ def shared_content_ngrams(left: str, right: str, n: int = 4) -> set[tuple[str, .
     if len(right_content) < n:
         return set()
     return ngrams(left_content, n) & ngrams(right_content, n)
+
+
+def _duplicate_stem(word: str) -> str:
+    base = stem(word)
+    # The existing stemmer maps "templates" -> "templat" but leaves
+    # "template" unchanged. Duplicate measurement needs those to meet without
+    # changing the calibrated scorer's stemmer globally.
+    if len(base) > 4 and base.endswith("e"):
+        return base[:-1]
+    return base
+
+
+def claim_stems(claim: str) -> set[str]:
+    """Content-word stems for duplicate claim comparison."""
+    return {_duplicate_stem(w) for w in content_toks(claim)}
+
+
+def shared_stem_overlap(left: str, right: str) -> float | None:
+    """Shared stem overlap between two claims, using the shorter claim as base."""
+    left_stems = claim_stems(left)
+    right_stems = claim_stems(right)
+    if not left_stems or not right_stems:
+        return None
+    return len(left_stems & right_stems) / min(len(left_stems), len(right_stems))
+
+
+class DuplicateUnit:
+    def __init__(self, unit_id: str, post_id: str, claim: str):
+        self.unit_id = unit_id
+        self.post_id = post_id
+        self.claim = claim
+
+
+class DuplicatePair:
+    def __init__(self, left: DuplicateUnit, right: DuplicateUnit, overlap: float):
+        self.left = left
+        self.right = right
+        self.overlap = overlap
 
 
 def score_pair(claim: str, text: str,
@@ -293,6 +335,134 @@ def load_transcripts_by_unit(db_path: str, unit_ids: list[str]) -> dict[str, str
         return {unit_id: found.get(unit_id) for unit_id in unit_ids}
     finally:
         conn.close()
+
+
+def load_duplicate_units(db_path: str, client_id: str) -> tuple[int, list[DuplicateUnit]]:
+    import duckdb
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        cols = [r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name='message_units'").fetchall()]
+        if "claim" not in cols or "post_id" not in cols or "unit_id" not in cols:
+            raise SystemExit("message_units needs `unit_id`, `post_id`, and `claim` columns")
+        tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        if "client_posts" not in tables:
+            raise SystemExit("client_posts is required so duplicate measurement is client-scoped")
+        rows = conn.execute(
+            """
+            SELECT mu.unit_id, mu.post_id, mu.claim
+            FROM message_units mu
+            WHERE EXISTS (
+                SELECT 1 FROM client_posts cp
+                WHERE cp.post_id = mu.post_id AND cp.client_id = ?
+            )
+            ORDER BY mu.post_id, mu.unit_id
+            """,
+            [client_id],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    units = [
+        DuplicateUnit(unit_id=uid, post_id=post_id, claim=claim)
+        for uid, post_id, claim in rows
+        if claim and claim_stems(claim)
+    ]
+    return len(rows), units
+
+
+def find_duplicate_pairs(units: list[DuplicateUnit], threshold: float) -> list[DuplicatePair]:
+    pairs: list[DuplicatePair] = []
+    for i, left in enumerate(units):
+        for right in units[i + 1:]:
+            overlap = shared_stem_overlap(left.claim, right.claim)
+            if overlap is not None and overlap >= threshold:
+                pairs.append(DuplicatePair(left=left, right=right, overlap=overlap))
+    return sorted(
+        pairs,
+        key=lambda p: (-p.overlap, p.left.post_id, p.right.post_id, p.left.unit_id, p.right.unit_id),
+    )
+
+
+def _print_duplicate_pairs(title: str, grouped: dict[str, list[DuplicatePair]]) -> None:
+    count = sum(len(pairs) for pairs in grouped.values())
+    print(f"\n  {title}: {count:,}")
+    for group, pairs in sorted(grouped.items(), key=lambda item: (-len(item[1]), item[0])):
+        print(f"    {group}")
+        for pair in pairs:
+            print(f"      {pair.overlap:.2f}  {pair.left.unit_id} <-> {pair.right.unit_id}")
+            print(f"        - {tsv_cell(pair.left.claim)}")
+            print(f"        - {tsv_cell(pair.right.claim)}")
+
+
+def cmd_duplicates(
+    db_path: str,
+    client_id: str,
+    paraphrase_threshold: float = DEFAULT_PARAPHRASE_THRESHOLD,
+):
+    start = perf_counter()
+    total_units, units = load_duplicate_units(db_path, client_id)
+    pairs = find_duplicate_pairs(units, paraphrase_threshold)
+    elapsed = perf_counter() - start
+
+    scored = len(units)
+    print(f"\nNear-duplicate claims - client {client_id}")
+    print(f"  Threshold shared-stem overlap >= {paraphrase_threshold:.2f}")
+    print(f"  Scored claims {scored:,}/{total_units:,} units ({scored / total_units * 100:.1f}%)" if total_units else
+          "  Scored claims 0/0 units (no visible units)")
+    if total_units and scored < total_units:
+        print("  Missing/empty claims are unknown, not unique.")
+
+    if not units:
+        print("\n  No claim-bearing units to compare.\n")
+        print(f"  Runtime {elapsed:.2f}s\n")
+        return
+
+    same_post: dict[str, list[DuplicatePair]] = {}
+    cross_post: dict[str, list[DuplicatePair]] = {}
+    redundant_unit_ids: set[str] = set()
+    post_units: dict[str, set[str]] = {}
+    post_pairs: Counter[str] = Counter()
+
+    for pair in pairs:
+        redundant_unit_ids.add(pair.left.unit_id)
+        redundant_unit_ids.add(pair.right.unit_id)
+        for unit in (pair.left, pair.right):
+            post_units.setdefault(unit.post_id, set()).add(unit.unit_id)
+            post_pairs[unit.post_id] += 1
+
+        if pair.left.post_id == pair.right.post_id:
+            same_post.setdefault(pair.left.post_id, []).append(pair)
+        else:
+            key = " <-> ".join(sorted([pair.left.post_id, pair.right.post_id]))
+            cross_post.setdefault(key, []).append(pair)
+
+    redundant = len(redundant_unit_ids)
+    scored_pct = redundant / scored * 100
+    total_pct = redundant / total_units * 100 if total_units else 0.0
+    print(
+        f"\n  Near-duplicate units {redundant:,}/{scored:,} scored "
+        f"({scored_pct:.1f}% of scored, {total_pct:.1f}% of all visible units)"
+    )
+
+    _print_duplicate_pairs("Same-post duplicate pairs", same_post)
+    _print_duplicate_pairs("Cross-post duplicate pairs", cross_post)
+
+    print("\n  Posts with most redundant units:")
+    if not post_units:
+        print("    none")
+    else:
+        ranked = sorted(
+            post_units.items(),
+            key=lambda item: (-len(item[1]), -post_pairs[item[0]], item[0]),
+        )
+        for post_id, unit_ids in ranked:
+            print(
+                f"    {post_id:24} {len(unit_ids):>4,} redundant unit(s)  "
+                f"{post_pairs[post_id]:>4,} duplicate pair involvement(s)"
+            )
+    print(f"\n  Runtime {elapsed:.2f}s\n")
 
 
 def cmd_score(db_path: str,
@@ -534,6 +704,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PARAPHRASE_THRESHOLD,
     )
 
+    duplicates = subparsers.add_parser("duplicates")
+    duplicates.add_argument("db")
+    duplicates.add_argument("--client", required=True)
+    duplicates.add_argument(
+        "--paraphrase-threshold",
+        type=_paraphrase_threshold,
+        default=DEFAULT_PARAPHRASE_THRESHOLD,
+    )
+
     return parser
 
 
@@ -571,6 +750,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "compare":
         cmd_compare(args.marked, args.db, args.paraphrase_threshold)
+        return 0
+    if args.command == "duplicates":
+        cmd_duplicates(args.db, args.client, args.paraphrase_threshold)
         return 0
     return 2
 

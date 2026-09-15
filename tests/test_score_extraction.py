@@ -40,6 +40,54 @@ def _insert_unit(conn, unit_id, post_id, claim, text, topic="General"):
     )
 
 
+def _make_duplicate_db(tmp_path: Path) -> str:
+    db_path = str(tmp_path / "duplicates.duckdb")
+    conn = duckdb.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE message_units (
+            unit_id TEXT,
+            post_id TEXT,
+            claim TEXT,
+            text TEXT,
+            topic TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE client_posts (
+            client_id TEXT,
+            post_id TEXT,
+            added_at TIMESTAMP
+        )
+        """
+    )
+    conn.close()
+    return db_path
+
+
+def _insert_duplicate_unit(
+    conn,
+    unit_id,
+    post_id,
+    claim,
+    client_id="client_a",
+    text="source transcript",
+):
+    conn.execute(
+        "INSERT INTO client_posts VALUES (?, ?, CURRENT_TIMESTAMP)",
+        [client_id, post_id],
+    )
+    conn.execute(
+        """
+        INSERT INTO message_units (unit_id, post_id, claim, text, topic)
+        VALUES (?, ?, ?, ?, 'CV')
+        """,
+        [unit_id, post_id, claim, text],
+    )
+
+
 def test_load_left_joins_transcripts(tmp_path):
     from tools.score_extraction import load
 
@@ -258,6 +306,182 @@ def test_blind_cli_can_sample_one_extraction_run(tmp_path):
     assert "new_unit" in text
     assert "old_unit" not in text
     assert "Sample restricted to extraction_run_id='sample-run'." in result.stdout
+
+
+def test_duplicates_flags_redundant_cv_template_claims(tmp_path, capsys):
+    from tools.score_extraction import cmd_duplicates
+
+    transcript = (
+        "CV mistakes you should avoid. Let's make pink, add a cute selfie... "
+        "let's take this standardized template. Black and white. Simple, easy to scan."
+    )
+    db_path = _make_duplicate_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_duplicate_unit(
+        conn,
+        "u_colour_selfie",
+        "post_cv",
+        "Colorful templates and selfies are not suitable for a professional CV",
+        text=transcript,
+    )
+    _insert_duplicate_unit(
+        conn,
+        "u_bw_effective",
+        "post_cv",
+        "A black and white template is more effective for a CV than a colorful one",
+        text=transcript,
+    )
+    _insert_duplicate_unit(
+        conn,
+        "u_standardized_scan",
+        "post_cv",
+        "A standardized black and white template is easier to scan and more professional",
+        text=transcript,
+    )
+    conn.close()
+
+    cmd_duplicates(db_path, "client_a")
+    out = capsys.readouterr().out
+
+    assert "Near-duplicate units 3/3 scored (100.0% of scored, 100.0% of all visible units)" in out
+    assert "Same-post duplicate pairs: 2" in out
+    assert "Cross-post duplicate pairs: 0" in out
+    assert "post_cv" in out
+    assert "u_bw_effective <-> u_colour_selfie" in out
+    assert "u_bw_effective <-> u_standardized_scan" in out
+    assert "Colorful templates and selfies are not suitable" in out
+    assert "standardized black and white template is easier to scan" in out
+    assert "3 redundant unit(s)" in out
+
+
+def test_duplicates_reports_cross_post_pairs(tmp_path, capsys):
+    from tools.score_extraction import cmd_duplicates
+
+    db_path = _make_duplicate_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_duplicate_unit(
+        conn,
+        "u1",
+        "post_a",
+        "Tailor your resume to match the job description",
+    )
+    _insert_duplicate_unit(
+        conn,
+        "u2",
+        "post_b",
+        "A resume should be tailored to the job description",
+    )
+    conn.close()
+
+    cmd_duplicates(db_path, "client_a")
+    out = capsys.readouterr().out
+
+    assert "Same-post duplicate pairs: 0" in out
+    assert "Cross-post duplicate pairs: 1" in out
+    assert "post_a <-> post_b" in out
+    assert "u1 <-> u2" in out
+
+
+def test_duplicates_scopes_to_one_client(tmp_path, capsys):
+    from tools.score_extraction import cmd_duplicates
+
+    db_path = _make_duplicate_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_duplicate_unit(conn, "client_a_unique", "post_a", "Ask for interview feedback")
+    _insert_duplicate_unit(
+        conn,
+        "client_b_dup_1",
+        "post_b1",
+        "Tailor your resume to match the job description",
+        client_id="client_b",
+    )
+    _insert_duplicate_unit(
+        conn,
+        "client_b_dup_2",
+        "post_b2",
+        "A resume should be tailored to the job description",
+        client_id="client_b",
+    )
+    conn.close()
+
+    cmd_duplicates(db_path, "client_a")
+    out = capsys.readouterr().out
+
+    assert "Near-duplicate units 0/1 scored" in out
+    assert "client_b_dup" not in out
+    assert "post_b1" not in out
+    assert "post_b2" not in out
+
+
+def test_duplicates_respects_threshold(tmp_path, capsys):
+    from tools.score_extraction import cmd_duplicates
+
+    db_path = _make_duplicate_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_duplicate_unit(
+        conn,
+        "u1",
+        "post_a",
+        "Tailor your resume to match the job description",
+    )
+    _insert_duplicate_unit(
+        conn,
+        "u2",
+        "post_b",
+        "A resume should be tailored to the job description",
+    )
+    conn.close()
+
+    cmd_duplicates(db_path, "client_a", paraphrase_threshold=0.95)
+    out = capsys.readouterr().out
+
+    assert "Near-duplicate units 0/2 scored" in out
+    assert "Cross-post duplicate pairs: 0" in out
+
+
+def test_duplicates_reports_claim_coverage_without_treating_missing_as_unique(tmp_path, capsys):
+    from tools.score_extraction import cmd_duplicates
+
+    db_path = _make_duplicate_db(tmp_path)
+    conn = duckdb.connect(db_path)
+    _insert_duplicate_unit(conn, "with_claim", "post_a", "Ask for interview feedback")
+    _insert_duplicate_unit(conn, "missing_claim", "post_b", None)
+    conn.close()
+
+    cmd_duplicates(db_path, "client_a")
+    out = capsys.readouterr().out
+
+    assert "Scored claims 1/2 units (50.0%)" in out
+    assert "Missing/empty claims are unknown, not unique." in out
+    assert "Near-duplicate units 0/1 scored (0.0% of scored, 0.0% of all visible units)" in out
+
+
+def test_duplicates_cli_rejects_bad_threshold(tmp_path):
+    import pathlib
+    import subprocess
+    import sys
+
+    db_path = _make_duplicate_db(tmp_path)
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(root / "tools" / "score_extraction.py"),
+            "duplicates",
+            db_path,
+            "--client",
+            "client_a",
+            "--paraphrase-threshold",
+            "0",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(root),
+    )
+
+    assert result.returncode != 0
+    assert "--paraphrase-threshold" in result.stderr
+    assert "outside 0-1" in result.stderr
 
 
 def test_compare_counts_lifted_as_lazy_not_wrong(tmp_path, capsys):
