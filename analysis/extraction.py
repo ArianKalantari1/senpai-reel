@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import hashlib
 import uuid
 from dataclasses import dataclass, field
@@ -102,6 +103,47 @@ downstream, nothing can tell it apart from a real finding.
 """
 
 
+class OutOfCreditError(RuntimeError):
+    """The account has no credit. Retrying will not help.
+
+    OpenAI returns 429 for two unrelated situations: a rate limit, which
+    clears on its own in seconds, and an exhausted credit balance, which
+    clears only when somebody adds money. Treating them alike means either
+    sitting in a backoff loop against a wall, or giving up on a transient
+    blip. The `code` field in the error body is what separates them.
+    """
+
+
+class RateLimitedError(RuntimeError):
+    """Transient 429. Worth retrying, and the caller is told how many times."""
+
+
+# Deliberately small. A re-extraction run is interactive — somebody is waiting
+# on it — so this trades throughput for not stalling. Rate limits on a single
+# sequential caller clear in seconds; if they do not, the run should fail and
+# say so rather than sit silently.
+_RATE_LIMIT_ATTEMPTS = 4
+_RATE_LIMIT_BASE_DELAY = 2.0
+
+
+def _retry_after_seconds(resp, attempt: int) -> float:
+    """Honour Retry-After when the API sends it, otherwise back off."""
+    header = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+    if header:
+        try:
+            return max(0.0, float(header))
+        except (TypeError, ValueError):
+            pass
+    return _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+
+
+def _openai_error_code(resp) -> str:
+    try:
+        return str((resp.json().get("error") or {}).get("code") or "")
+    except Exception:
+        return ""
+
+
 @dataclass
 class MessageUnit:
     unit_id: str
@@ -187,12 +229,35 @@ def extract_message_units(
         "max_tokens": 2000,
     }
 
-    resp = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
+    resp = None
+    for attempt in range(_RATE_LIMIT_ATTEMPTS):
+        resp = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code != 429:
+            break
+
+        code = _openai_error_code(resp)
+        # insufficient_quota / credit_balance_exhausted mean the account is
+        # out of money. Backing off just delays the same answer, so fail now
+        # with the one thing the operator can act on.
+        if "quota" in code or "credit" in code:
+            raise OutOfCreditError(
+                "OpenAI rejected the request: no credit remaining on the account.\n"
+                "Add credit at https://platform.openai.com/settings/organization/billing/\n"
+                "then re-run. Nothing was charged and no partial work was kept."
+            )
+
+        if attempt == _RATE_LIMIT_ATTEMPTS - 1:
+            raise RateLimitedError(
+                f"Rate limited by OpenAI after {_RATE_LIMIT_ATTEMPTS} attempts. "
+                "Wait a minute and re-run — a re-extraction run resumes where it "
+                "stopped when given the same --run-id."
+            )
+        time.sleep(_retry_after_seconds(resp, attempt))
 
     if resp.status_code == 401:
         raise PermissionError("Invalid OpenAI API key")
