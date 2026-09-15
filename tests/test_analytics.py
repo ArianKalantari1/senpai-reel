@@ -122,6 +122,7 @@ class TestGetTopicDistribution:
         from analysis.analytics import get_topic_distribution
         df = get_topic_distribution(_client_id(analytics_db))
         assert isinstance(df, pd.DataFrame)
+        assert df.empty
 
 
 class TestGetContentGapMatrix:
@@ -144,6 +145,7 @@ class TestGetContentGapMatrix:
         from analysis.analytics import get_content_gap_matrix
         df = get_content_gap_matrix(_client_id(analytics_db))
         assert isinstance(df, pd.DataFrame)
+        assert df.empty
 
 
 class TestGetTopPosts:
@@ -159,8 +161,7 @@ class TestGetTopPosts:
         _seed_basic_data(analytics_db)
         df = get_top_posts(_client_id(analytics_db), topic="Resume")
         assert isinstance(df, pd.DataFrame)
-        # Should only return posts that have a Resume message unit
-        assert len(df) >= 1
+        assert df["post_id"].tolist() == ["p1"]
 
     def test_limit_respected(self, analytics_db):
         from analysis.analytics import get_top_posts
@@ -189,15 +190,16 @@ class TestGetHashtagIntelligence:
         from analysis.analytics import get_hashtag_intelligence
         _seed_basic_data(analytics_db)
         df = get_hashtag_intelligence(_client_id(analytics_db))
-        # "jobs" appears in p1, "resume" in p1 — check jobs has count >= 1
         jobs_row = df[df["hashtag"] == "jobs"]
-        if len(jobs_row) > 0:
-            assert jobs_row.iloc[0]["count"] >= 1
+        assert len(jobs_row) == 1
+        assert jobs_row.iloc[0]["count"] == 1
 
     def test_empty_db_returns_empty_df(self, analytics_db):
         from analysis.analytics import get_hashtag_intelligence
         df = get_hashtag_intelligence(_client_id(analytics_db))
         assert isinstance(df, pd.DataFrame)
+        assert df.empty
+        assert list(df.columns) == ["hashtag", "count"]
 
 
 class TestGetPostingCadence:
