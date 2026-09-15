@@ -416,3 +416,78 @@ def test_blind_refuses_rows_written_before_the_condition_column(tmp_path):
             )
     finally:
         db_mod.DB_PATH = old_path
+
+
+def test_blind_accepts_an_output_path_alongside_its_required_flags():
+    """The documented invocation has to parse.
+
+    `--client` and `--run-id` are both required, so they always land between
+    <db> and the output path. argparse stops matching positionals at the first
+    optional, so a trailing positional `out` was unreachable: the form printed
+    in this tool's own docstring died with "unrecognized arguments: out.tsv".
+    """
+    from tools import score_generation as sg
+
+    parser = sg._build_parser() if hasattr(sg, "_build_parser") else None
+    argv = ["blind", "some.duckdb", "--client", "c1", "--run-id", "r1",
+            "--out", "somewhere.tsv"]
+
+    captured = {}
+
+    def fake_blind(db, client, run_id, out):
+        captured.update(db=db, client=client, run_id=run_id, out=out)
+        return 0
+
+    original = sg.cmd_blind
+    sg.cmd_blind = fake_blind
+    try:
+        assert sg.main(argv) == 0
+    finally:
+        sg.cmd_blind = original
+
+    assert captured == {
+        "db": "some.duckdb",
+        "client": "c1",
+        "run_id": "r1",
+        "out": "somewhere.tsv",
+    }
+
+
+def test_blind_still_defaults_the_output_path():
+    from tools import score_generation as sg
+
+    captured = {}
+    original = sg.cmd_blind
+    sg.cmd_blind = lambda db, client, run_id, out: captured.update(out=out) or 0
+    try:
+        sg.main(["blind", "some.duckdb", "--client", "c1", "--run-id", "r1"])
+    finally:
+        sg.cmd_blind = original
+
+    assert captured["out"] == sg.DEFAULT_BLIND_OUT
+
+
+def test_compare_explains_an_orphaned_marking_file(tmp_path):
+    """Renaming the marked file must not surface a raw FileNotFoundError.
+
+    The key is found by the marked file's name, so moving one without the
+    other orphans it. The traceback named a .key.tsv path the operator never
+    typed, which reads like a bug in the tool rather than a moved file.
+    """
+    from tools import score_generation as sg
+
+    marked = tmp_path / "renamed.tsv"
+    marked.write_text(
+        "pair_id\tPREFERENCE\tleft\tright\n"
+        "pair_001\tleft\tAlpha\tBeta\n",
+        encoding="utf-8",
+    )
+
+    try:
+        sg.cmd_compare(str(marked))
+    except SystemExit as exc:
+        message = str(exc)
+        assert "No key file beside renamed.tsv" in message, message
+        assert "re-run compare against the file blind actually wrote" in message, message
+    else:
+        raise AssertionError("cmd_compare should refuse a marking file with no key")
