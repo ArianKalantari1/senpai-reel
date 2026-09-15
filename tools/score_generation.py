@@ -9,7 +9,7 @@ human chooses left, right, or tie in a blind TSV; `compare` only counts that
 human judgement and reports the cost of each condition.
 
     score_generation.py run <db> --client X --pairs N [--content-type caption|hooks|script]
-    score_generation.py blind <db> --run-id NAME [out.tsv]
+    score_generation.py blind <db> --client X --run-id NAME [out.tsv]
     score_generation.py compare <marked.tsv>
 """
 from __future__ import annotations
@@ -61,13 +61,10 @@ class GeneratedRow:
     content_type: str
     output_text: str
     model: str
+    condition: str | None
     source_units: list[str]
     cost_usd: float | None
     created_at: object
-
-    @property
-    def condition(self) -> str:
-        return "grounded" if self.source_units else "bare"
 
 
 @dataclass(frozen=True)
@@ -128,10 +125,13 @@ def _require_generated_schema(conn, db_path: str):
             "WHERE table_name = 'generated_content'"
         ).fetchall()
     }
-    if "generation_run_id" in present:
+    required = {"generation_run_id", "generation_condition"}
+    missing = sorted(required - present)
+    if not missing:
         return
     raise SystemExit(
-        "\n  This database predates generated_content.generation_run_id.\n\n"
+        "\n  This database predates generated_content generation A/B columns "
+        f"({', '.join(missing)} missing).\n\n"
         "  `blind` opens the database read-only, so it cannot migrate it for you. "
         "Run the additive migration once, then re-run this command:\n\n"
         f"      {_migration_command(db_path)}\n"
@@ -208,6 +208,7 @@ def _generate(
     client_id: str,
     client_context: dict,
     run_id: str,
+    condition: str,
 ) -> GeneratedContent:
     if content_type == "caption":
         return generate_caption(
@@ -219,6 +220,7 @@ def _generate(
             client_id=client_id,
             client_context=client_context,
             generation_run_id=run_id,
+            generation_condition=condition,
         )
     if content_type == "hooks":
         return generate_hooks(
@@ -230,6 +232,7 @@ def _generate(
             client_id=client_id,
             client_context=client_context,
             generation_run_id=run_id,
+            generation_condition=condition,
         )
     if content_type == "script":
         return generate_script(
@@ -241,6 +244,7 @@ def _generate(
             client_id=client_id,
             client_context=client_context,
             generation_run_id=run_id,
+            generation_condition=condition,
         )
     raise SystemExit(f"Unknown content type: {content_type}")
 
@@ -312,19 +316,40 @@ def cmd_run(
             topic = topics[index % len(topics)]
             refs = grouped[topic][:REFERENCE_UNITS_PER_PAIR]
             print(f"  pair {index + 1:>3}: {topic} ({len(refs)} reference unit(s))")
-            grounded = _generate(content_type, topic, refs, api_key, client_id, client_context, run_id)
-            bare = _generate(content_type, topic, [], api_key, client_id, client_context, run_id)
+            grounded = _generate(
+                content_type,
+                topic,
+                refs,
+                api_key,
+                client_id,
+                client_context,
+                run_id,
+                "grounded",
+            )
+            bare = _generate(
+                content_type,
+                topic,
+                [],
+                api_key,
+                client_id,
+                client_context,
+                run_id,
+                "bare",
+            )
             grounded_costs.append(grounded.cost_usd)
             bare_costs.append(bare.cost_usd)
 
     print(f"\nWrote {pairs * 2} generated row(s) tagged generation_run_id={run_id!r}.")
     _print_cost_summary(grounded_costs, bare_costs)
-    print(f"\nBlind them with: score_generation.py blind {db_path} --run-id {run_id}\n")
+    print(
+        f"\nBlind them with: score_generation.py blind {db_path} "
+        f"--client {client_id} --run-id {run_id}\n"
+    )
     return 0
 
 
 def _row_from_db(row) -> GeneratedRow:
-    source_units = list(row[6] or [])
+    source_units = list(row[7] or [])
     return GeneratedRow(
         gen_id=row[0],
         client_id=row[1],
@@ -332,13 +357,14 @@ def _row_from_db(row) -> GeneratedRow:
         content_type=row[3] or "",
         output_text=row[4] or "",
         model=row[5] or "",
+        condition=row[6],
         source_units=source_units,
-        cost_usd=row[7],
-        created_at=row[8],
+        cost_usd=row[8],
+        created_at=row[9],
     )
 
 
-def _load_pairs(db_path: str, run_id: str) -> list[Pair]:
+def _load_pairs(db_path: str, client_id: str, run_id: str) -> list[Pair]:
     conn = _connect(db_path, read_only=True)
     try:
         _require_generated_schema(conn, db_path)
@@ -347,12 +373,13 @@ def _load_pairs(db_path: str, run_id: str) -> list[Pair]:
             for row in conn.execute(
                 """
                 SELECT gen_id, client_id, topic, content_type, output_text, model,
-                       source_units, cost_usd, created_at
+                       generation_condition, source_units, cost_usd, created_at
                 FROM generated_content
-                WHERE generation_run_id = ?
+                WHERE client_id = ?
+                  AND generation_run_id = ?
                 ORDER BY created_at, gen_id
                 """,
-                [run_id],
+                [client_id, run_id],
             ).fetchall()
         ]
     finally:
@@ -360,6 +387,12 @@ def _load_pairs(db_path: str, run_id: str) -> list[Pair]:
 
     grouped: dict[tuple[str, str, str, str], dict[str, list[GeneratedRow]]] = {}
     for row in rows:
+        if row.condition not in ("grounded", "bare"):
+            raise SystemExit(
+                f"\n  Run {run_id!r} for client {client_id!r} has row {row.gen_id!r} "
+                f"with invalid generation_condition={row.condition!r}. "
+                "Expected 'grounded' or 'bare'.\n"
+            )
         key = (row.client_id, row.content_type, row.topic, row.model)
         grouped.setdefault(key, {"grounded": [], "bare": []})[row.condition].append(row)
 
@@ -370,14 +403,23 @@ def _load_pairs(db_path: str, run_id: str) -> list[Pair]:
         bare = bucket["bare"]
         if len(grounded) != len(bare):
             raise SystemExit(
-                f"\n  Run {run_id!r} is not pair-complete for {key}: "
+                f"\n  Run {run_id!r} for client {client_id!r} is not pair-complete for {key}: "
                 f"{len(grounded)} grounded row(s), {len(bare)} bare row(s).\n"
             )
         for grounded_row, bare_row in zip(grounded, bare):
+            conditions = {grounded_row.condition, bare_row.condition}
+            if conditions != {"grounded", "bare"}:
+                raise SystemExit(
+                    f"\n  Run {run_id!r} for client {client_id!r} produced an invalid pair "
+                    f"for {key}: {sorted(str(c) for c in conditions)}.\n"
+                )
             pairs.append(Pair(len(pairs) + 1, grounded_row, bare_row))
 
     if not pairs:
-        raise SystemExit(f"\n  No generated_content rows found for generation_run_id={run_id!r}.\n")
+        raise SystemExit(
+            f"\n  No generated_content rows found for client_id={client_id!r} "
+            f"and generation_run_id={run_id!r}.\n"
+        )
     return pairs
 
 
@@ -390,8 +432,8 @@ def _write_tsv(path: Path, fieldnames: list[str], rows: list[dict], comments: li
         writer.writerows(rows)
 
 
-def cmd_blind(db_path: str, run_id: str, out: str = DEFAULT_BLIND_OUT) -> int:
-    pairs = _load_pairs(db_path, run_id)
+def cmd_blind(db_path: str, client_id: str, run_id: str, out: str = DEFAULT_BLIND_OUT) -> int:
+    pairs = _load_pairs(db_path, client_id, run_id)
     rng = random.Random(run_id)
     mark_rows = []
     key_rows = []
@@ -575,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
 
     blind = subparsers.add_parser("blind")
     blind.add_argument("db")
+    blind.add_argument("--client", required=True)
     blind.add_argument("--run-id", required=True)
     blind.add_argument("out", nargs="?", default=DEFAULT_BLIND_OUT)
 
@@ -590,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
             content_type=args.content_type,
         )
     if args.command == "blind":
-        return cmd_blind(args.db, args.run_id, args.out)
+        return cmd_blind(args.db, args.client, args.run_id, args.out)
     if args.command == "compare":
         return cmd_compare(args.marked)
     return 2

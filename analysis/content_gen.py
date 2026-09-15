@@ -48,6 +48,7 @@ class GeneratedContent:
     created_at: datetime
     client_id: str = DEFAULT_CLIENT_ID
     generation_run_id: Optional[str] = None
+    generation_condition: Optional[str] = None
 
 
 def _with_client_context(user_msg: str, client_context: Optional[dict]) -> str:
@@ -188,6 +189,7 @@ def generate_caption(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
     generation_run_id: Optional[str] = None,
+    generation_condition: Optional[str] = None,
 ) -> GeneratedContent:
     reference_units = _reference_units_for_generation(reference_units)
     context = format_reference_context(reference_units)
@@ -208,6 +210,7 @@ def generate_caption(
         created_at=datetime.utcnow(),
         client_id=client_id,
         generation_run_id=generation_run_id,
+        generation_condition=generation_condition,
     )
     _save(result, reference_units, client_id)
     return result
@@ -222,6 +225,7 @@ def generate_hooks(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
     generation_run_id: Optional[str] = None,
+    generation_condition: Optional[str] = None,
 ) -> GeneratedContent:
     reference_units = _reference_units_for_generation(reference_units)
     system = HOOKS_SYSTEM.format(count=count)
@@ -243,6 +247,7 @@ def generate_hooks(
         created_at=datetime.utcnow(),
         client_id=client_id,
         generation_run_id=generation_run_id,
+        generation_condition=generation_condition,
     )
     _save(result, reference_units, client_id)
     return result
@@ -257,6 +262,7 @@ def generate_script(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
     generation_run_id: Optional[str] = None,
+    generation_condition: Optional[str] = None,
 ) -> GeneratedContent:
     reference_units = _reference_units_for_generation(reference_units)
     word_count = int(duration_sec / 60 * 130)
@@ -281,6 +287,7 @@ def generate_script(
         created_at=datetime.utcnow(),
         client_id=client_id,
         generation_run_id=generation_run_id,
+        generation_condition=generation_condition,
     )
     _save(result, reference_units, client_id)
     return result
@@ -299,13 +306,14 @@ def _save(
             """
             INSERT INTO generated_content
                 (gen_id, client_id, created_at, topic, content_type, output_text, model,
-                 source_units, tokens_used, cost_usd, generation_run_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 source_units, tokens_used, cost_usd, generation_run_id, generation_condition)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 content.gen_id, client_id, content.created_at, content.topic, content.content_type,
                 content.output_text, content.model, source_ids,
                 content.tokens_used, content.cost_usd, content.generation_run_id,
+                content.generation_condition,
             ],
         )
     finally:

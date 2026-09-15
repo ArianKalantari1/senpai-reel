@@ -122,7 +122,7 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
         gen_id TEXT PRIMARY KEY, client_id TEXT, created_at TIMESTAMP, topic TEXT,
         content_type TEXT, output_text TEXT, model TEXT,
         source_units TEXT[], tokens_used INTEGER, cost_usd DOUBLE,
-        generation_run_id TEXT
+        generation_run_id TEXT, generation_condition TEXT
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS pipeline_locks (
