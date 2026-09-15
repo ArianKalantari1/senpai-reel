@@ -537,19 +537,29 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _mentions_flag(argv: list[str], flag: str) -> bool:
+    return any(arg == flag or arg.startswith(flag + "=") for arg in argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
         print(__doc__)
         return 2
 
-    if argv[0] == "blind" and any(
-        arg == "--paraphrase-threshold" or arg.startswith("--paraphrase-threshold=")
-        for arg in argv[1:]
-    ):
+    # Both flags are rejected here rather than by argparse, which would only
+    # say "unrecognized arguments" and leave the operator to guess which
+    # subcommand the flag belongs to.
+    if argv[0] == "blind" and _mentions_flag(argv[1:], "--paraphrase-threshold"):
         raise SystemExit(
             "--paraphrase-threshold does not apply to `blind` — it writes units "
             "for you to mark and never scores them. Pass it to `compare`."
+        )
+
+    if argv[0] in ("score", "compare") and _mentions_flag(argv[1:], "--run-id"):
+        raise SystemExit(
+            f"--run-id does not apply to `{argv[0]}` — only `blind` selects an "
+            "extraction run. Both other commands read the whole database."
         )
 
     args = build_parser().parse_args(argv)

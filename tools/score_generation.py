@@ -387,6 +387,19 @@ def _load_pairs(db_path: str, client_id: str, run_id: str) -> list[Pair]:
 
     grouped: dict[tuple[str, str, str, str], dict[str, list[GeneratedRow]]] = {}
     for row in rows:
+        if row.condition is None:
+            # The migration backfills nothing, so a row carrying a run id but
+            # no condition was written by the pre-#41 harness, which inferred
+            # the condition from source_units. Inferring it again here would
+            # reproduce the bug this column exists to remove: a grounded
+            # generation whose references all got filtered reads as "bare".
+            raise SystemExit(
+                f"\n  Run {run_id!r} for client {client_id!r} has row {row.gen_id!r} "
+                "with no generation_condition.\n\n"
+                "  That row predates the column, so which condition produced it is "
+                "not recoverable.\n  Re-run the pair under a new run id:\n\n"
+                f"      score_generation.py run <db> --client {client_id} --pairs N\n"
+            )
         if row.condition not in ("grounded", "bare"):
             raise SystemExit(
                 f"\n  Run {run_id!r} for client {client_id!r} has row {row.gen_id!r} "
@@ -407,12 +420,11 @@ def _load_pairs(db_path: str, client_id: str, run_id: str) -> list[Pair]:
                 f"{len(grounded)} grounded row(s), {len(bare)} bare row(s).\n"
             )
         for grounded_row, bare_row in zip(grounded, bare):
-            conditions = {grounded_row.condition, bare_row.condition}
-            if conditions != {"grounded", "bare"}:
-                raise SystemExit(
-                    f"\n  Run {run_id!r} for client {client_id!r} produced an invalid pair "
-                    f"for {key}: {sorted(str(c) for c in conditions)}.\n"
-                )
+            # No condition re-check here on purpose. Rows were bucketed by
+            # their own condition above, and every value that is not
+            # 'grounded' or 'bare' already exited, so a pair drawn from the
+            # two buckets cannot be mixed. A guard for it would be a branch no
+            # test can reach, which reads as load-bearing to the next person.
             pairs.append(Pair(len(pairs) + 1, grounded_row, bare_row))
 
     if not pairs:
