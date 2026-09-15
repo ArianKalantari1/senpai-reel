@@ -71,12 +71,33 @@ def _with_client_context(user_msg: str, client_context: Optional[dict]) -> str:
 
 
 def _reference_units_for_generation(reference_units: list) -> list:
-    """Filter units that are research evidence, not generation source material."""
-    return [
-        unit for unit in reference_units
-        if (getattr(unit, "unit_role", None) or "").strip().lower()
-        not in ROLES_EXCLUDED_FROM_GENERATION
-    ]
+    """Drop units that are research evidence, not generation source material.
+
+    `hasattr`, not `getattr(unit, "unit_role", None)`. The default erases the
+    difference between two very different units:
+
+      - role present and None  -> ALLOW. Deliberate: every legacy row is NULL,
+        and excluding NULL starves generation. See analysis/unit_role.py.
+      - no `unit_role` attribute at all -> RAISE. A caller passing a shape that
+        cannot carry a role is a programming error, not a unit to wave through.
+
+    Collapsing those two was a real defect: `SearchResult` had no `unit_role`
+    field, so `getattr` returned None for every unit search produced, nothing
+    was ever filtered, and the whole suite stayed green. Absent is not zero,
+    and it is not "safe" either.
+    """
+    kept = []
+    for unit in reference_units:
+        if not hasattr(unit, "unit_role"):
+            raise TypeError(
+                f"{type(unit).__name__} has no `unit_role`, so the generation "
+                "role firewall cannot be applied to it. Add the field rather "
+                "than passing the unit through unchecked."
+            )
+        role = (unit.unit_role or "").strip().lower()
+        if role not in ROLES_EXCLUDED_FROM_GENERATION:
+            kept.append(unit)
+    return kept
 
 
 def _call_gpt(

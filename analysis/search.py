@@ -26,6 +26,11 @@ class SearchResult:
     score: float
     video_url: Optional[str] = None
     posted_at: Optional[str] = None
+    # Carried so generation can enforce the role firewall on what search hands
+    # it. Without this field the filter in analysis/content_gen.py reads None
+    # for every unit and silently passes competitor technique through.
+    # NULL stays None: not classified is not the same as safe.
+    unit_role: Optional[str] = None
 
 
 def _require_client_id(client_id: Optional[str]) -> str:
@@ -117,7 +122,8 @@ def semantic_search(
                 mu.claim,
                 list_cosine_similarity(mu.embedding, ?::FLOAT[1536]) AS score,
                 p.video_url,
-                CAST(p.posted_at AS TEXT) AS posted_at
+                CAST(p.posted_at AS TEXT) AS posted_at,
+                mu.unit_role
             FROM message_units mu
             LEFT JOIN posts p ON mu.post_id = p.post_id
             LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
@@ -140,6 +146,7 @@ def semantic_search(
                 score=float(r[7]) if r[7] is not None else 0.0,
                 video_url=r[8],
                 posted_at=r[9],
+                unit_role=r[10],
             )
             for r in rows
         ]
@@ -203,7 +210,8 @@ def keyword_search(
                 mu.topic, mu.content_type, mu.text, mu.claim,
                 mu.confidence AS score,
                 p.video_url,
-                CAST(p.posted_at AS TEXT) AS posted_at
+                CAST(p.posted_at AS TEXT) AS posted_at,
+                mu.unit_role
             FROM message_units mu
             LEFT JOIN posts p ON mu.post_id = p.post_id
             LEFT JOIN creator_accounts ca ON p.account_id = ca.account_id
@@ -219,6 +227,7 @@ def keyword_search(
                 unit_id=r[0], post_id=r[1], username=r[2],
                 topic=r[3], content_type=r[4], text=r[5], claim=r[6],
                 score=float(r[7]) if r[7] else 0.0, video_url=r[8], posted_at=r[9],
+                unit_role=r[10],
             )
             for r in rows
         ]

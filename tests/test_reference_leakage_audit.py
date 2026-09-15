@@ -79,12 +79,17 @@ def _seed_reference_unit(db_mod, unit_id: str = "unit_leakage"):
     finally:
         conn.close()
 
+    # `unit_role=None` is not decoration. Generation refuses a unit that has no
+    # `unit_role` attribute at all, because a shape that cannot carry a role
+    # cannot be checked against the firewall. NULL here means "not classified",
+    # which is allowed and is what every legacy row looks like.
     return SimpleNamespace(
         unit_id=unit_id,
         text=COMPETITOR_PHRASE,
         claim="Keep resume design clean and professional.",
         topic="Resume",
         content_type="warning",
+        unit_role=None,
     )
 
 

@@ -392,3 +392,59 @@ class TestGenerateScript:
 
         assert result.content_type == "script"
         assert result.topic == "Salary"
+
+
+class TestFirewallAgainstTheTypeSearchActuallyReturns:
+    """The firewall is only real if it fires on what production hands it.
+
+    Every caller reaches generation through `semantic_search` or
+    `keyword_search`, and both return `SearchResult`. When `SearchResult` had
+    no `unit_role` field, `getattr(unit, "unit_role", None)` returned None for
+    every unit, nothing was ever filtered, and the whole suite stayed green —
+    because the other tests in this file build units with `SimpleNamespace`,
+    a type that has the attribute by construction and never occurs in
+    production.
+
+    These tests use the real dataclass on purpose. Revert the `unit_role`
+    field on `SearchResult` and the first one fails.
+    """
+
+    @staticmethod
+    def _result(role):
+        from analysis.search import SearchResult
+        return SearchResult(
+            unit_id="u1", post_id="p1", username="rival", topic="Resume",
+            content_type="hook", text="competitor hook wording",
+            claim="a hook that works", score=1.0, unit_role=role,
+        )
+
+    @pytest.mark.parametrize("role", ["technique", "meta", "offtopic"])
+    def test_excluded_roles_never_reach_generation(self, role):
+        from analysis.content_gen import _reference_units_for_generation
+        assert _reference_units_for_generation([self._result(role)]) == []
+
+    @pytest.mark.parametrize("role", [None, "subject"])
+    def test_null_and_subject_pass_through(self, role):
+        from analysis.content_gen import _reference_units_for_generation
+        # NULL is allowed deliberately: every legacy row is NULL and excluding
+        # it would starve generation. This is a decision, not an oversight.
+        assert len(_reference_units_for_generation([self._result(role)])) == 1
+
+    def test_role_survives_the_search_dataclass(self):
+        from analysis.search import SearchResult
+        # Pins the field itself. Without it the filter above is inert.
+        assert "unit_role" in SearchResult.__dataclass_fields__
+        assert SearchResult.__dataclass_fields__["unit_role"].default is None
+
+    def test_a_unit_that_cannot_carry_a_role_raises(self):
+        from analysis.content_gen import _reference_units_for_generation
+
+        class NoRole:
+            claim = "something"
+            text = "something"
+
+        # Absent is not zero, and it is not "safe" either. A caller passing a
+        # shape with no role is a programming error; failing loudly is the
+        # only way this class of bug does not hide behind a green suite again.
+        with pytest.raises(TypeError, match="unit_role"):
+            _reference_units_for_generation([NoRole()])
