@@ -227,3 +227,62 @@ class TestSemanticSearch:
             with pytest.raises(ValueError):
                 semantic_search("resume", "fake_key", "")
         embed_mock.assert_not_called()
+
+
+class TestSearchCarriesUnitRole:
+    """unit_role is the one SearchResult field with a shipped regression.
+
+    It was added so analysis/content_gen.py could keep competitor technique out
+    of generation. The first version of that filter read the role off a
+    SearchResult that had no such field, so every unit came back None and the
+    firewall passed everything through — with the whole suite green. Asserting
+    the other fields does not cover it, because a dropped column reads as NULL
+    and NULL is the legitimate value for every legacy row.
+    """
+
+    def _set_role(self, db_path, unit_id, role):
+        conn = duckdb.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE message_units SET unit_role = ? WHERE unit_id = ?",
+                [role, unit_id],
+            )
+        finally:
+            conn.close()
+
+    def test_keyword_search_carries_the_stored_role(self, search_db):
+        from analysis.search import keyword_search
+
+        db_path, uid_a, _uid_b, client_id = search_db
+        self._set_role(db_path, uid_a, "technique")
+
+        results = keyword_search("resume", client_id)
+        by_id = {r.unit_id: r for r in results}
+        assert by_id[uid_a].unit_role == "technique"
+
+    def test_semantic_search_carries_the_stored_role(self, search_db):
+        from analysis.search import semantic_search
+
+        db_path, uid_a, _uid_b, client_id = search_db
+        self._set_role(db_path, uid_a, "technique")
+
+        query_vec = [1.0] + [0.0] * 1535
+        with patch("analysis.search.embed_text", return_value=query_vec):
+            results = semantic_search("test", "k", client_id, top_k=5)
+
+        by_id = {r.unit_id: r for r in results}
+        assert by_id[uid_a].unit_role == "technique"
+
+    def test_an_unclassified_unit_stays_none_rather_than_defaulting(self, search_db):
+        """Absent is not a role.
+
+        Every row predating the classifier is NULL. If search substituted a
+        default here, the generation filter would start judging rows on a value
+        nobody assigned.
+        """
+        from analysis.search import keyword_search
+
+        _db_path, _uid_a, uid_b, client_id = search_db
+        results = keyword_search("interview", client_id)
+        by_id = {r.unit_id: r for r in results}
+        assert by_id[uid_b].unit_role is None
