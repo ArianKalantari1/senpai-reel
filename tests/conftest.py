@@ -129,3 +129,23 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
         lock_name TEXT PRIMARY KEY, run_id TEXT, client_id TEXT,
         started_at TIMESTAMP, heartbeat_at TIMESTAMP, stage TEXT
     )""")
+
+@pytest.fixture(autouse=True)
+def _isolate_secrets_files(tmp_path, monkeypatch):
+    """Keep every test away from the developer's real secrets files.
+
+    core/config.py reads ~/.streamlit/secrets.toml and <repo>/.streamlit/
+    secrets.toml as fallbacks after the environment. Both are real paths on a
+    working machine, so without this the config tests pass or fail depending on
+    what the person running them happens to have configured — and they did:
+    test_optional_provider_secret_is_not_in_use_when_absent fails on any
+    machine whose home secrets file defines ASSEMBLYAI_API_KEY.
+
+    A test that consults the developer's home directory is not testing the
+    code. Tests that need a secrets file point these at their own fixture.
+    """
+    import core.config as config
+
+    missing = tmp_path / "no-secrets"
+    monkeypatch.setattr(config, "_GLOBAL_SECRETS_TOML", missing / "global.toml")
+    monkeypatch.setattr(config, "_SECRETS_TOML", missing / "project.toml")
