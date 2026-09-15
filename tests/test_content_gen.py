@@ -4,6 +4,7 @@ Tests for analysis/content_gen.py — mocked GPT + prompt rendering.
 import json
 import uuid
 import pytest
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from datetime import datetime
 
@@ -123,6 +124,23 @@ def _openai_response(content="Generated text", in_tokens=100, out_tokens=50):
     }
 
 
+def _unit(
+    *,
+    unit_id="u1",
+    claim="Allowed reference insight",
+    text="Allowed source wording",
+    unit_role=None,
+):
+    return SimpleNamespace(
+        unit_id=unit_id,
+        text=text,
+        topic="Resume",
+        content_type="tip",
+        claim=claim,
+        unit_role=unit_role,
+    )
+
+
 class TestCallGpt:
     def test_returns_text_tokens_cost(self):
         from analysis.content_gen import _call_gpt
@@ -221,6 +239,112 @@ class TestGenerateCaption:
         assert row is not None
         assert row[0] == "Caption saved"
 
+    def test_filters_excluded_roles_before_prompt_and_saved_sources(self, gen_db):
+        """Direct callers cannot hand strategy/technique evidence to generation."""
+        import duckdb
+        from analysis.content_gen import generate_caption
+
+        allowed = _unit(
+            unit_id="allowed",
+            claim="Allowed NULL role insight",
+            text="Allowed NULL role wording",
+            unit_role=None,
+        )
+        technique = _unit(
+            unit_id="technique",
+            claim="Excluded technique claim",
+            text="Competitor CTA wording",
+            unit_role="technique",
+        )
+        meta = _unit(
+            unit_id="meta",
+            claim="Excluded meta claim",
+            text="Competitor channel plug",
+            unit_role="meta",
+        )
+        offtopic = _unit(
+            unit_id="offtopic",
+            claim="Excluded offtopic claim",
+            text="Competitor unrelated wording",
+            unit_role="offtopic",
+        )
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = _openai_response("Original caption")
+
+        with patch("analysis.content_gen.requests.post", return_value=mock_resp) as post:
+            result = generate_caption(
+                "Resume",
+                "profile tips",
+                "casual",
+                [technique, allowed, meta, offtopic],
+                "k",
+            )
+
+        user_msg = post.call_args.kwargs["json"]["messages"][1]["content"]
+        assert "Allowed NULL role insight" in user_msg
+        assert "Excluded technique claim" not in user_msg
+        assert "Competitor CTA wording" not in user_msg
+        assert "Excluded meta claim" not in user_msg
+        assert "Competitor channel plug" not in user_msg
+        assert "Excluded offtopic claim" not in user_msg
+        assert "Competitor unrelated wording" not in user_msg
+
+        conn = duckdb.connect(gen_db.DB_PATH)
+        row = conn.execute(
+            "SELECT source_units FROM generated_content WHERE gen_id = ?",
+            [result.gen_id],
+        ).fetchone()
+        conn.close()
+        assert row[0] == ["allowed"]
+
+
+@pytest.mark.parametrize(
+    ("function_name", "call_args"),
+    [
+        ("generate_caption", ("Resume", "profile tips", "casual")),
+        ("generate_hooks", ("Resume", "profile tips")),
+        ("generate_script", ("Resume", 30, "casual")),
+    ],
+)
+def test_generation_functions_keep_null_role_and_filter_technique(
+    gen_db, function_name, call_args
+):
+    """NULL unit_role is still allowed; only known-bad roles are filtered."""
+    from analysis import content_gen
+
+    allowed = _unit(
+        unit_id="allowed",
+        claim="Allowed legacy NULL role insight",
+        text="Allowed legacy NULL role wording",
+        unit_role=None,
+    )
+    technique = _unit(
+        unit_id="technique",
+        claim="Filtered technique insight",
+        text="Filtered technique wording",
+        unit_role="technique",
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status.return_value = None
+    mock_resp.json.return_value = _openai_response("Original content")
+
+    with patch("analysis.content_gen.requests.post", return_value=mock_resp) as post:
+        getattr(content_gen, function_name)(
+            *call_args,
+            [technique, allowed],
+            "k",
+        )
+
+    user_msg = post.call_args.kwargs["json"]["messages"][1]["content"]
+    assert "Allowed legacy NULL role insight" in user_msg
+    assert "Filtered technique insight" not in user_msg
+    assert "Filtered technique wording" not in user_msg
+
 
 # ── generate_hooks ────────────────────────────────────────────────────────────
 
@@ -268,3 +392,59 @@ class TestGenerateScript:
 
         assert result.content_type == "script"
         assert result.topic == "Salary"
+
+
+class TestFirewallAgainstTheTypeSearchActuallyReturns:
+    """The firewall is only real if it fires on what production hands it.
+
+    Every caller reaches generation through `semantic_search` or
+    `keyword_search`, and both return `SearchResult`. When `SearchResult` had
+    no `unit_role` field, `getattr(unit, "unit_role", None)` returned None for
+    every unit, nothing was ever filtered, and the whole suite stayed green —
+    because the other tests in this file build units with `SimpleNamespace`,
+    a type that has the attribute by construction and never occurs in
+    production.
+
+    These tests use the real dataclass on purpose. Revert the `unit_role`
+    field on `SearchResult` and the first one fails.
+    """
+
+    @staticmethod
+    def _result(role):
+        from analysis.search import SearchResult
+        return SearchResult(
+            unit_id="u1", post_id="p1", username="rival", topic="Resume",
+            content_type="hook", text="competitor hook wording",
+            claim="a hook that works", score=1.0, unit_role=role,
+        )
+
+    @pytest.mark.parametrize("role", ["technique", "meta", "offtopic"])
+    def test_excluded_roles_never_reach_generation(self, role):
+        from analysis.content_gen import _reference_units_for_generation
+        assert _reference_units_for_generation([self._result(role)]) == []
+
+    @pytest.mark.parametrize("role", [None, "subject"])
+    def test_null_and_subject_pass_through(self, role):
+        from analysis.content_gen import _reference_units_for_generation
+        # NULL is allowed deliberately: every legacy row is NULL and excluding
+        # it would starve generation. This is a decision, not an oversight.
+        assert len(_reference_units_for_generation([self._result(role)])) == 1
+
+    def test_role_survives_the_search_dataclass(self):
+        from analysis.search import SearchResult
+        # Pins the field itself. Without it the filter above is inert.
+        assert "unit_role" in SearchResult.__dataclass_fields__
+        assert SearchResult.__dataclass_fields__["unit_role"].default is None
+
+    def test_a_unit_that_cannot_carry_a_role_raises(self):
+        from analysis.content_gen import _reference_units_for_generation
+
+        class NoRole:
+            claim = "something"
+            text = "something"
+
+        # Absent is not zero, and it is not "safe" either. A caller passing a
+        # shape with no role is a programming error; failing loudly is the
+        # only way this class of bug does not hide behind a green suite again.
+        with pytest.raises(TypeError, match="unit_role"):
+            _reference_units_for_generation([NoRole()])

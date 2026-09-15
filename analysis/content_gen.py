@@ -15,6 +15,7 @@ from typing import List, Optional
 import requests
 
 from core.db import DEFAULT_CLIENT_ID, get_connection
+from analysis.unit_role import ROLES_EXCLUDED_FROM_GENERATION
 from analysis.originality import (
     ReferenceLeakError,
     find_overlap,
@@ -67,6 +68,36 @@ def _with_client_context(user_msg: str, client_context: Optional[dict]) -> str:
     if not lines:
         return user_msg
     return f"{user_msg}\n\nClient context:\n" + "\n".join(lines)
+
+
+def _reference_units_for_generation(reference_units: list) -> list:
+    """Drop units that are research evidence, not generation source material.
+
+    `hasattr`, not `getattr(unit, "unit_role", None)`. The default erases the
+    difference between two very different units:
+
+      - role present and None  -> ALLOW. Deliberate: every legacy row is NULL,
+        and excluding NULL starves generation. See analysis/unit_role.py.
+      - no `unit_role` attribute at all -> RAISE. A caller passing a shape that
+        cannot carry a role is a programming error, not a unit to wave through.
+
+    Collapsing those two was a real defect: `SearchResult` had no `unit_role`
+    field, so `getattr` returned None for every unit search produced, nothing
+    was ever filtered, and the whole suite stayed green. Absent is not zero,
+    and it is not "safe" either.
+    """
+    kept = []
+    for unit in reference_units:
+        if not hasattr(unit, "unit_role"):
+            raise TypeError(
+                f"{type(unit).__name__} has no `unit_role`, so the generation "
+                "role firewall cannot be applied to it. Add the field rather "
+                "than passing the unit through unchecked."
+            )
+        role = (unit.unit_role or "").strip().lower()
+        if role not in ROLES_EXCLUDED_FROM_GENERATION:
+            kept.append(unit)
+    return kept
 
 
 def _call_gpt(
@@ -156,6 +187,7 @@ def generate_caption(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
 ) -> GeneratedContent:
+    reference_units = _reference_units_for_generation(reference_units)
     context = format_reference_context(reference_units)
     user_msg = CAPTION_USER.format(topic=topic, tone=tone, angle=angle, reference_context=context)
     user_msg = _with_client_context(user_msg, client_context)
@@ -187,6 +219,7 @@ def generate_hooks(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
 ) -> GeneratedContent:
+    reference_units = _reference_units_for_generation(reference_units)
     system = HOOKS_SYSTEM.format(count=count)
     context = format_reference_context(reference_units)
     user_msg = HOOKS_USER.format(topic=topic, angle=angle, reference_context=context, count=count)
@@ -219,6 +252,7 @@ def generate_script(
     client_id: str = DEFAULT_CLIENT_ID,
     client_context: Optional[dict] = None,
 ) -> GeneratedContent:
+    reference_units = _reference_units_for_generation(reference_units)
     word_count = int(duration_sec / 60 * 130)
     system = SCRIPT_SYSTEM.format(duration_sec=duration_sec, word_count=word_count, tone=tone)
     context = format_reference_context(reference_units)
