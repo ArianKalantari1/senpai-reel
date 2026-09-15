@@ -572,3 +572,63 @@ class TestParaphraseThresholdFlag:
 
         se.cmd_compare(str(marked), None, 0.95)
         assert "0/1" in capsys.readouterr().out
+
+
+class TestBlindRefusesToWriteAnEmptySample:
+    """"Wrote 0 units" followed by instructions is a quiet failure.
+
+    A real run hit this: `blind --run-id stance-check` was called before the
+    write run had succeeded, so nothing carried that id. The tool wrote an
+    empty file, printed "Wrote 0 units to stance.tsv", and then told the
+    operator to go and mark it.
+    """
+
+    def _se(self):
+        import importlib.util, pathlib, sys
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location("se2", root / "tools" / "score_extraction.py")
+        m = importlib.util.module_from_spec(spec); sys.modules["se2"] = m
+        spec.loader.exec_module(m)
+        return m
+
+    def test_unknown_run_id_exits_and_names_the_id(self, tmp_path):
+        se = self._se()
+        db_path = _make_score_db(tmp_path)
+        conn = duckdb.connect(db_path)
+        # The column has to exist or the migration guard fires first with a
+        # different (also correct) message. A fixture that cannot reach the
+        # code under test is not testing it.
+        conn.execute("ALTER TABLE message_units ADD COLUMN extraction_run_id TEXT")
+        conn.execute(
+            "INSERT INTO message_units (unit_id, post_id, claim, text, topic) "
+            "VALUES ('u1','p1','a claim','a source','careers')"
+        )
+        conn.close()
+        out = tmp_path / "empty.tsv"
+        with pytest.raises(SystemExit) as exc:
+            se.cmd_blind(db_path, 10, str(out), run_id="never-written")
+        assert "never-written" in str(exc.value)
+        # And it must not leave a misleading empty file behind.
+        assert not out.exists()
+
+    def test_empty_database_exits_rather_than_writing_nothing(self, tmp_path):
+        se = self._se()
+        db_path = _make_score_db(tmp_path)
+        out = tmp_path / "empty.tsv"
+        with pytest.raises(SystemExit):
+            se.cmd_blind(db_path, 10, str(out))
+        assert not out.exists()
+
+    def test_a_real_sample_still_writes(self, tmp_path, capsys):
+        se = self._se()
+        db_path = _make_score_db(tmp_path)
+        conn = duckdb.connect(db_path)
+        conn.execute(
+            "INSERT INTO message_units VALUES ('u1','p1','a claim','a source','careers')"
+        )
+        conn.close()
+        out = tmp_path / "sample.tsv"
+        se.cmd_blind(db_path, 10, str(out))
+        assert out.exists()
+        # Asking for more than exist is not an error, but it is worth saying.
+        assert "only 1 were available" in capsys.readouterr().out

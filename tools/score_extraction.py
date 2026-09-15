@@ -355,6 +355,26 @@ def cmd_blind(db_path: str, n: int, out: str, run_id: str | None = None):
     rows = load(db_path, run_id=run_id)
     random.seed(7)  # reproducible, so the scorer cannot be tuned to the sample
     sample = random.sample(rows, min(n, len(rows)))
+
+    # An empty sample used to print "Wrote 0 units" and then carry on with
+    # instructions for marking a file that has nothing in it. Silence about
+    # zero is how a mistyped --run-id, or a re-extraction run that never
+    # actually wrote, costs somebody an afternoon.
+    if not sample:
+        if run_id:
+            raise SystemExit(
+                f"\n  No units found with extraction_run_id={run_id!r}, so {out} "
+                "would be empty.\n\n"
+                "  Either that run has not been written yet — a --dry-run writes "
+                "nothing — or\n  the id is not the one the run used. Check with:\n\n"
+                "      SELECT extraction_run_id, COUNT(*) FROM message_units\n"
+                "      GROUP BY 1 ORDER BY 2 DESC;\n"
+            )
+        raise SystemExit(
+            f"\n  No units to sample, so {out} would be empty. The database has no "
+            "message_units\n  with both a claim and a text.\n"
+        )
+
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("# Mark each line's VERDICT column: good / wrong / lazy\n")
         fh.write("#   good  = faithful and adds something over the source\n")
@@ -370,6 +390,8 @@ def cmd_blind(db_path: str, n: int, out: str, run_id: str | None = None):
     print(f"\nWrote {len(sample)} units to {out}")
     if run_id:
         print(f"Sample restricted to extraction_run_id={run_id!r}.")
+    if len(sample) < n:
+        print(f"NOTE: you asked for {n} and only {len(sample)} were available.")
     print("No verdicts included — the scorer's opinion is withheld on purpose,")
     print("so your reading is not anchored by it.")
     print(f"\nMark the VERDICT column, then: score_extraction.py compare {out} {db_path}\n")
