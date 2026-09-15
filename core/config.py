@@ -82,31 +82,62 @@ def get_secret(name: str, st_module=None) -> str:
 # Environment still wins. An export is a deliberate act for one command; the
 # file is ambient configuration. This is purely a fallback, so nothing that
 # worked before changes behaviour.
+# Streamlit reads secrets from TWO files, and a key configured in either one
+# works in the app. The first version of this fallback checked only the
+# project-local file, so a key living in the user-level file was invisible to
+# the CLI while the app found it happily — the same failure as before, one
+# directory over. If the CLI does not look everywhere the app looks, it will
+# keep reporting a missing credential that is not missing.
+#
+# Project-local is listed second because it is the more specific of the two and
+# should win a conflict. That ordering matches Streamlit's own documented
+# behaviour, but it is a claim about another project's semantics rather than
+# something verified here — if the two files ever disagree in practice, check
+# it before trusting this comment.
+# Both are module-level so a test can point them at a tmp_path. Reading them
+# inside the function rather than capturing at import time is what makes that
+# patching work.
+_GLOBAL_SECRETS_TOML = Path.home() / ".streamlit" / "secrets.toml"
 _SECRETS_TOML = Path(__file__).resolve().parent.parent / ".streamlit" / "secrets.toml"
 
 
-def _secret_from_toml(name: str, path: Path | None = None) -> str:
-    """Read one key from .streamlit/secrets.toml. Never raises.
+def _secrets_toml_paths() -> list[Path]:
+    return [_GLOBAL_SECRETS_TOML, _SECRETS_TOML]
 
-    A missing file, unreadable file, malformed TOML or absent key all mean the
-    same thing to the caller: not configured. Returns "" so `has_secret` stays
-    honest rather than a crash masquerading as a missing credential.
-    """
-    toml_path = path or _SECRETS_TOML
+
+def _load_toml(path: Path) -> dict:
+    """Parse one TOML file. Never raises — unreadable means "nothing here"."""
     try:
         import tomllib
     except ModuleNotFoundError:  # Python < 3.11
         try:
             import tomli as tomllib  # type: ignore[no-redef]
         except ModuleNotFoundError:
-            return ""
+            return {}
     try:
-        with open(toml_path, "rb") as fh:
-            data = tomllib.load(fh)
+        with open(path, "rb") as fh:
+            return tomllib.load(fh)
     except (OSError, ValueError):
-        return ""
-    value = data.get(name, "")
-    return str(value).strip() if value else ""
+        return {}
+
+
+def _secret_from_toml(name: str, path: Path | None = None) -> str:
+    """Read one key from Streamlit's secrets files. Never raises.
+
+    A missing file, unreadable file, malformed TOML or absent key all mean the
+    same thing to the caller: not configured. Returns "" so `has_secret` stays
+    honest rather than a crash masquerading as a missing credential.
+
+    Pass `path` to read exactly one file. Otherwise both of Streamlit's
+    locations are consulted, later entries winning.
+    """
+    paths = [path] if path is not None else _secrets_toml_paths()
+    found = ""
+    for candidate in paths:
+        value = _load_toml(candidate).get(name, "")
+        if value:
+            found = str(value).strip()
+    return found
 
 
 def has_secret(name: str, st_module=None) -> bool:
