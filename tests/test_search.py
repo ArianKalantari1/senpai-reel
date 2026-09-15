@@ -108,9 +108,13 @@ class TestKeywordSearch:
         assert len(results) >= 1
         r = results[0]
         assert isinstance(r, SearchResult)
-        assert r.unit_id is not None
-        assert r.post_id is not None
-        assert r.topic in ("Resume", "Interview", "General")
+        assert r.unit_id == search_db[1]
+        assert r.post_id == "post_a"
+        assert r.username == "user1"
+        assert r.topic == "Resume"
+        assert r.content_type == "tip"
+        assert r.text == "Resume keyword tips"
+        assert r.claim == "Keywords matter"
 
     def test_missing_client_id_raises(self, search_db):
         from analysis.search import keyword_search
@@ -188,9 +192,17 @@ class TestSemanticSearch:
         with patch("analysis.search.embed_text", return_value=query_vec):
             results = semantic_search("test", "k", _client_id(search_db), top_k=5)
 
-        for r in results:
-            assert isinstance(r, SearchResult)
-            assert r.score is not None
+        assert len(results) >= 2
+        first = results[0]
+        assert isinstance(first, SearchResult)
+        assert first.unit_id == search_db[1]
+        assert first.post_id == "post_a"
+        assert first.username == "user1"
+        assert first.topic == "Resume"
+        assert first.content_type == "tip"
+        assert first.text == "Resume keyword tips"
+        assert first.claim == "Keywords matter"
+        assert first.score == pytest.approx(1.0, abs=0.01)
 
     def test_empty_db_returns_empty_list(self, tmp_path):
         from analysis.search import semantic_search
