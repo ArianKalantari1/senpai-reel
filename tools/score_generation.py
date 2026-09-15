@@ -9,7 +9,7 @@ human chooses left, right, or tie in a blind TSV; `compare` only counts that
 human judgement and reports the cost of each condition.
 
     score_generation.py run <db> --client X --pairs N [--content-type caption|hooks|script]
-    score_generation.py blind <db> --client X --run-id NAME [out.tsv]
+    score_generation.py blind <db> --client X --run-id NAME [--out out.tsv]
     score_generation.py compare <marked.tsv>
 """
 from __future__ import annotations
@@ -532,6 +532,18 @@ def cmd_compare(marked: str) -> int:
         raise SystemExit("\n  No rows found. Fill in PREFERENCE with left/right/tie.\n")
 
     key_path = _key_path(marked)
+    if not key_path.exists():
+        # The key is a sidecar: it lives beside the marking file and is found
+        # by name. Renaming or moving the marked file orphans it, and the bare
+        # FileNotFoundError that used to surface here named a path the operator
+        # never typed.
+        raise SystemExit(
+            f"\n  No key file beside {marked_path.name}: expected {key_path}\n\n"
+            "  `blind` writes the marking file and its hidden key as a pair, and\n"
+            "  `compare` finds the key by the marked file's name. If you renamed\n"
+            "  or moved the marking file, move the key with it under the matching\n"
+            "  name, or re-run compare against the file blind actually wrote.\n"
+        )
     key_rows = _read_tsv(key_path)
     if not key_rows:
         raise SystemExit(f"\n  Missing or empty hidden key file: {key_path}\n")
@@ -631,7 +643,12 @@ def main(argv: list[str] | None = None) -> int:
     blind.add_argument("db")
     blind.add_argument("--client", required=True)
     blind.add_argument("--run-id", required=True)
-    blind.add_argument("out", nargs="?", default=DEFAULT_BLIND_OUT)
+    # --out, not a trailing positional. `--client` and `--run-id` are both
+    # required, so they always sit between <db> and the output path, and
+    # argparse stops matching positionals at the first optional: the
+    # documented `blind <db> --client X --run-id Y out.tsv` died with
+    # "unrecognized arguments: out.tsv".
+    blind.add_argument("--out", default=DEFAULT_BLIND_OUT)
 
     compare = subparsers.add_parser("compare")
     compare.add_argument("marked")
