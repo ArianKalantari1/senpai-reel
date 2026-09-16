@@ -331,3 +331,74 @@ class TestSubtopicGrouping:
         with pytest.raises(SystemExit) as exc:
             tg.load_rows(gaps_db, "c1", "claim")
         assert "topic or subtopic" in str(exc.value)
+
+
+class TestImplausibleEngagementIsNotAMeasurement:
+    """The real corpus contains values down to -0.64% and one at 135.71%.
+
+    Engagement is likes as a percentage of views. Negative is impossible.
+    Neither is a low performer nor a star, and sorting them into a ranking
+    puts data errors at both ends of a report about market structure.
+    """
+
+    def test_a_negative_rate_is_excluded_not_ranked_last(self, gaps_db):
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Resume", ["A claim about resumes"], -0.64)
+        _seed(gaps_db, "c1", "a2", "p2", "Resume", ["A different resume claim"], 4.0)
+
+        row, = tg.topic_rows(tg.load_rows(gaps_db, "c1"), 0.70)
+
+        assert row["median_engagement"] == 4.0
+        assert row["engagement_known"] == 1
+        assert row["engagement_implausible"] == 1
+        assert row["posts"] == 2
+
+    def test_a_rate_above_one_hundred_percent_is_excluded_too(self, gaps_db):
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Visa", ["A claim about visas"], 135.71)
+
+        row, = tg.topic_rows(tg.load_rows(gaps_db, "c1"), 0.70)
+
+        assert row["median_engagement"] is None, "an impossible rate was reported"
+        assert row["engagement_implausible"] == 1
+
+    def test_the_report_says_how_many_were_dropped(self, gaps_db, capsys):
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Resume", ["A claim about resumes"], -0.5)
+        _seed(gaps_db, "c1", "a2", "p2", "Resume", ["A different resume claim"], 4.0)
+
+        tg.cmd_report(gaps_db, "c1", 0.70)
+        out = capsys.readouterr().out
+
+        assert "1 post(s) excluded" in out
+        assert "data errors" in out
+
+
+class TestMinimumObservations:
+    def test_a_single_post_row_can_be_hidden(self, gaps_db, capsys):
+        """One post's engagement is an anecdote, not a rate.
+
+        On the real corpus five different subtopics all read 135.71% because
+        they came from one post, and they topped the ranking.
+        """
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Fluke", ["A one off claim here"], 90.0)
+        for n in range(3):
+            _seed(gaps_db, "c1", f"a{n}", f"q{n}", "Real",
+                  [f"Substantive claim number {n} about hiring"], 4.0)
+
+        tg.cmd_report(gaps_db, "c1", 0.70, "topic", 3)
+        out = capsys.readouterr().out
+
+        assert "Real" in out
+        assert "Fluke" not in out, "a single-post row survived --min-posts 3"
+        assert "1 topic(s) hidden" in out
+
+    def test_hiding_everything_exits_with_the_best_available_count(self, gaps_db):
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Thin", ["A claim"], 4.0)
+
+        with pytest.raises(SystemExit) as exc:
+            tg.cmd_report(gaps_db, "c1", 0.70, "topic", 50)
+
+        assert "The most any has is 1" in str(exc.value)

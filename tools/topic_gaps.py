@@ -66,6 +66,17 @@ DEFAULT_DEDUPE_THRESHOLD = 0.70
 UNKNOWN = "no data"
 
 
+# Engagement is likes as a percentage of views. Negative is impossible and
+# above 100% means likes exceeded counted views. The real corpus contains
+# both: values down to -0.64% and a post at 135.71%. They are not measurements
+# and must not sort to the top or bottom of a ranking as though they were.
+MAX_PLAUSIBLE_ENGAGEMENT = 100.0
+
+
+def implausible(value: float | None) -> bool:
+    return value is not None and (value < 0.0 or value > MAX_PLAUSIBLE_ENGAGEMENT)
+
+
 def _connect(db_path: str):
     import duckdb
 
@@ -185,6 +196,7 @@ def topic_rows(rows: list[tuple], threshold: float) -> list[dict]:
         g = grouped.setdefault(topic, {
             "topic": topic, "accounts": set(), "posts": set(),
             "units": 0, "claims": [], "embeddings": [], "engagements": {},
+            "implausible": set(),
         })
         g["accounts"].add(account)
         g["posts"].add(post_id)
@@ -195,7 +207,11 @@ def topic_rows(rows: list[tuple], threshold: float) -> list[dict]:
         # Per post, not per unit: a post with nine units would otherwise weigh
         # nine times in the engagement figure for its topic.
         if engagement is not None:
-            g["engagements"][post_id] = float(engagement)
+            value = float(engagement)
+            if implausible(value):
+                g["implausible"].add(post_id)
+            else:
+                g["engagements"][post_id] = value
 
     out = []
     for g in grouped.values():
@@ -212,6 +228,7 @@ def topic_rows(rows: list[tuple], threshold: float) -> list[dict]:
             # engaged with.
             "median_engagement": statistics.median(values) if values else None,
             "engagement_known": len(values),
+            "engagement_implausible": len(g["implausible"]),
         })
     # Unknown engagement sorts last rather than sorting as zero.
     out.sort(key=lambda r: (r["median_engagement"] is None,
@@ -224,12 +241,22 @@ def _pct(value: float | None) -> str:
 
 
 def cmd_report(db_path: str, client_id: str, threshold: float,
-               level: str = "topic") -> int:
+               level: str = "topic", min_posts: int = 1) -> int:
     rows = load_rows(db_path, client_id, level)
     if not rows:
         raise SystemExit(f"\n  No client-visible units found for {client_id!r}.\n")
 
     topics = topic_rows(rows, threshold)
+    # One post's engagement is an anecdote. Ranking by it puts whatever single
+    # video went viral at the top of a report about market structure: the real
+    # corpus produced five different subtopics all reading 135.71%, which is
+    # one post counted five times.
+    hidden = [r for r in topics if r["posts"] < min_posts]
+    topics = [r for r in topics if r["posts"] >= min_posts]
+    if not topics:
+        raise SystemExit(
+            f"\n  No {level}(s) reach --min-posts {min_posts}. "
+            f"The most any has is {max((r['posts'] for r in hidden), default=0)}.\n")
     print(f"\n{level.capitalize()} supply vs engagement — client {client_id}")
     measures = {r["measure"] for r in topics}
     print(f"  Ideas collapse near-duplicate claims at >= {threshold:.2f}, "
@@ -244,11 +271,22 @@ def cmd_report(db_path: str, client_id: str, threshold: float,
     print(f"  {level[:18]:<18}{'accts':>6}{'posts':>7}{'units':>7}{'ideas':>7}"
           f"{'units/idea':>12}{'median engagement':>20}{'known':>8}")
     for r in topics:
+        # A unit whose claim is blank counts in `units` but yields no idea, so
+        # ideas can be 0 while units is not. Dividing there would either crash
+        # or invent a ratio for a row that has no usable claim at all.
         per_idea = f"{r['units'] / r['ideas']:.1f}" if r["ideas"] else UNKNOWN
         known = f"{r['engagement_known']}/{r['posts']}"
         print(f"  {r['topic'][:18]:<18}{r['accounts']:>6}{r['posts']:>7}{r['units']:>7}"
               f"{r['ideas']:>7}{per_idea:>12}{_pct(r['median_engagement']):>20}{known:>8}")
 
+    dropped = sum(r["engagement_implausible"] for r in topics)
+    if dropped:
+        print(f"  {dropped} post(s) excluded for an impossible engagement rate "
+              "(negative, or above 100%).")
+        print("  Those are data errors, not low performers, and are not counted"
+              " either way.")
+    if hidden:
+        print(f"  {len(hidden)} {level}(s) hidden by --min-posts {min_posts}.")
     measured = [r for r in topics if r["median_engagement"] is not None]
     print(f"\n  {len(topics)} {level}(s); {len(measured)} with any engagement data.")
     if measured:
@@ -273,10 +311,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="grouping level; subtopic is the finer grain the "
                              "extractor already records")
     parser.add_argument("--dedupe-threshold", type=float, default=DEFAULT_DEDUPE_THRESHOLD)
+    parser.add_argument("--min-posts", type=int, default=1,
+                        help="hide rows with fewer posts; one post's engagement "
+                             "is an anecdote, not a rate")
     args = parser.parse_args(argv)
     if not 0 < args.dedupe_threshold <= 1:
         raise SystemExit("--dedupe-threshold must be between 0 and 1.")
-    return cmd_report(args.db, args.client, args.dedupe_threshold, args.by)
+    if args.min_posts < 1:
+        raise SystemExit("--min-posts must be at least 1.")
+    return cmd_report(args.db, args.client, args.dedupe_threshold, args.by,
+                      args.min_posts)
 
 
 if __name__ == "__main__":
