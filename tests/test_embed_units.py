@@ -201,28 +201,51 @@ class TestCostIsNeverAFalseZero:
         assert "$0.000250" in capsys.readouterr().out
 
 
-def test_a_batch_that_never_resolves_anything_stops_instead_of_spinning(
+def test_a_batch_that_saves_nothing_stops_instead_of_spinning(
         embed_db, capsys, monkeypatch):
-    """cmd_run loops until nothing is pending, which trusts the caller.
+    """Forward progress means rows LEFT the pending set.
 
-    A batch reporting units but resolving none of them would loop against the
-    API forever. Found by writing a fake that did exactly that — the test run
-    hung rather than failed, which is the worst way for this to surface.
+    The first version of this guard only fired when done == 0 AND failed == 0.
+    On a real database whose embedding column rejected every write, every batch
+    came back done=0 failed=50 — so the guard never fired, the same fifty rows
+    were selected again, and the loop ran 190 times paying for 9,500
+    embeddings and saving none of them.
     """
+    eu = _eu()
+    _seed_units(embed_db, "c1", 500)
+    calls = []
+
+    def all_fail(*a, **k):
+        calls.append(1)
+        # Bounded: without it the only failure mode is hanging, which is how
+        # the original gap surfaced — a mutation run timed out rather than
+        # reporting.
+        if len(calls) > 5:
+            raise AssertionError(
+                f"called {len(calls)} times while saving nothing — the loop "
+                "would charge for the same rows forever")
+        return {"done": 0, "failed": 50, "total": 50, "total_cost_usd": 0.00005}
+
+    monkeypatch.setattr(eu, "embed_pending_units", all_fail)
+    monkeypatch.setattr(eu, "get_secret", lambda name: "sk-test")
+
+    eu.cmd_run(embed_db, "c1", None, dry_run=False)
+    out = capsys.readouterr().out
+
+    assert len(calls) == 1, f"kept paying after saving nothing: {len(calls)} batches"
+    assert "50 row(s) in this batch failed and none were saved" in out
+    assert "same rows again" in out
+
+
+def test_a_batch_reporting_rows_but_doing_nothing_also_stops(embed_db, capsys, monkeypatch):
     eu = _eu()
     _seed_units(embed_db, "c1", 60)
     calls = []
 
     def stuck(*a, **k):
         calls.append(1)
-        # Bounded on purpose. Without this the test can only fail by hanging,
-        # which is how the missing guard surfaced in the first place — a
-        # mutation run timed out instead of reporting. A test whose failure
-        # mode is "never finishes" tells you nothing at 3am.
         if len(calls) > 5:
-            raise AssertionError(
-                f"cmd_run called embed_pending_units {len(calls)} times without "
-                "progress — the no-progress guard is missing")
+            raise AssertionError("no-progress guard is missing")
         return {"done": 0, "failed": 0, "total": 50}
 
     monkeypatch.setattr(eu, "embed_pending_units", stuck)
@@ -230,5 +253,103 @@ def test_a_batch_that_never_resolves_anything_stops_instead_of_spinning(
 
     eu.cmd_run(embed_db, "c1", None, dry_run=False)
 
-    assert len(calls) == 1, f"kept calling after no progress: {len(calls)} times"
-    assert "reported units but embedded none" in capsys.readouterr().out
+    assert len(calls) == 1
+
+
+class TestDimensionPreflight:
+    """The stored column decides the width, and it is not always 1536.
+
+    A real database declares FLOAT[512]. creative-director-ai#29 recorded a
+    Voyage adapter at 512 dimensions against a FLOAT[1536] column and noted the
+    resize migration was never written — it had in fact been applied to that
+    database, and nothing in the code knew.
+    """
+
+    def test_it_reads_the_declared_width(self, embed_db):
+        eu = _eu()
+        assert eu.embedding_dimension(embed_db) == 1536
+
+    def test_a_narrow_column_is_read_and_requested(self, tmp_path, monkeypatch, capsys):
+        eu = _eu()
+        narrow = str(tmp_path / "narrow.duckdb")
+        conn = duckdb.connect(narrow)
+        try:
+            conn.execute("CREATE TABLE message_units (unit_id TEXT, client_id TEXT, "
+                         "post_id TEXT, text TEXT, embedding FLOAT[512])")
+            conn.execute("CREATE TABLE client_posts (client_id TEXT, post_id TEXT)")
+            conn.execute("INSERT INTO client_posts VALUES ('c1','p1')")
+            conn.execute("INSERT INTO message_units VALUES ('u1','c1','p1','t',NULL)")
+        finally:
+            conn.close()
+
+        assert eu.embedding_dimension(narrow) == 512
+
+        seen = {}
+
+        def fake(api_key, batch_size=50, client_id="c1", dimensions=None, **kw):
+            seen["dimensions"] = dimensions
+            return {"done": 0, "failed": 0, "total": 0}
+
+        monkeypatch.setattr(eu, "embed_pending_units", fake)
+        monkeypatch.setattr(eu, "get_secret", lambda name: "sk-test")
+        eu.cmd_run(narrow, "c1", None, dry_run=False)
+
+        assert seen["dimensions"] == 512, "asked the API for the wrong width"
+        out = capsys.readouterr().out
+        assert "FLOAT[512]" in out
+        assert "NOT comparable" in out, "the width mismatch was not called out"
+
+    def test_an_unreadable_width_refuses_to_spend(self, tmp_path, monkeypatch):
+        eu = _eu()
+        empty = str(tmp_path / "empty.duckdb")
+        conn = duckdb.connect(empty)
+        try:
+            # A variable-length list column: realistic, readable by
+            # pending_count, but carries no declared width to request.
+            conn.execute("CREATE TABLE message_units (unit_id TEXT, client_id TEXT, "
+                         "post_id TEXT, text TEXT, embedding FLOAT[])")
+            conn.execute("CREATE TABLE client_posts (client_id TEXT, post_id TEXT)")
+            conn.execute("INSERT INTO client_posts VALUES ('c1','p1')")
+            conn.execute("INSERT INTO message_units VALUES ('u1','c1','p1','t',NULL)")
+        finally:
+            conn.close()
+
+        monkeypatch.setattr(eu, "embed_pending_units",
+                            lambda *a, **k: pytest.fail("spent without knowing the width"))
+        monkeypatch.setattr(eu, "get_secret", lambda name: "sk-test")
+
+        with pytest.raises(SystemExit) as exc:
+            eu.cmd_run(empty, "c1", None, dry_run=False)
+        assert "Refusing to spend on a guess" in str(exc.value)
+
+
+class TestWidthParsing:
+    """Tested on type strings directly: the discriminating cases are ones the
+    schema in this repo does not currently produce, which is exactly why a
+    database-only test let a loose regex survive mutation.
+    """
+
+    def test_only_a_bracketed_number_counts(self):
+        eu = _eu()
+        assert eu.width_of("FLOAT[512]") == 512
+        assert eu.width_of("FLOAT[1536]") == 1536
+
+    def test_a_digit_in_the_type_name_is_not_the_width(self):
+        """DuckDB reports REAL as FLOAT4.
+
+        A search for any digit reads FLOAT4[512] as 4, and the tool would then
+        request four-dimension vectors — wrong, and wrong in a way that writes
+        successfully into a column of the wrong shape.
+        """
+        eu = _eu()
+        assert eu.width_of("FLOAT4[512]") == 512
+        assert eu.width_of("FLOAT4") is None
+
+    def test_a_variable_length_list_has_no_declared_width(self):
+        eu = _eu()
+        assert eu.width_of("FLOAT[]") is None
+
+    def test_absent_is_none_not_a_default(self):
+        eu = _eu()
+        assert eu.width_of(None) is None
+        assert eu.width_of("") is None
