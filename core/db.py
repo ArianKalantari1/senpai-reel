@@ -364,7 +364,8 @@ def init_db():
         prompt_version TEXT,
         embedding    FLOAT[1536],
         embedded_at  TIMESTAMP,
-        embedding_cost_usd DOUBLE
+        embedding_cost_usd DOUBLE,
+        embedding_model TEXT
     )
     """)
 
@@ -407,6 +408,7 @@ def init_db():
             pass  # already present
 
     _add_column_if_missing(conn, "message_units", "embedding_cost_usd", "DOUBLE")
+    _add_column_if_missing(conn, "message_units", "embedding_model", "TEXT")
 
     # ── Unit role (creative-director-ai #27) ──────────────────────────────────
     # A second axis beside content_type: is this an idea about the world, or a

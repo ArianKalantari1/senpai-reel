@@ -120,6 +120,25 @@ def embed_db(tmp_path):
     db_mod.DB_PATH = old_path
 
 
+def _seed_pending_unit(db_mod, unit_id="unit_1", post_id="post_1", text="text"):
+    conn = duckdb.connect(db_mod.DB_PATH)
+    now = datetime.utcnow()
+    client_id = db_mod.DEFAULT_CLIENT_ID
+    try:
+        conn.execute(
+            "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, ?, ?)",
+            [client_id, post_id, now],
+        )
+        conn.execute("""
+            INSERT INTO message_units (unit_id, client_id, post_id, text, claim, topic, content_type,
+                confidence, extracted_at, model)
+            VALUES (?, ?, ?, ?, 'claim', 'Resume', 'tip', 0.9, ?, 'gpt-4o-mini')
+        """, (unit_id, client_id, post_id, text, now))
+    finally:
+        conn.close()
+    return unit_id
+
+
 class TestEmbedPendingUnits:
     def test_no_pending_returns_zeros(self, embed_db):
         from analysis.embeddings import embed_pending_units
@@ -128,7 +147,7 @@ class TestEmbedPendingUnits:
         assert result["total"] == 0
 
     def test_embeds_pending_units(self, embed_db):
-        from analysis.embeddings import embed_pending_units
+        from analysis import embeddings
 
         conn = duckdb.connect(embed_db.DB_PATH)
         now = datetime.utcnow()
@@ -151,20 +170,85 @@ class TestEmbedPendingUnits:
         mock_resp.json.return_value = _openai_embed_response(["a", "b", "c"])
 
         with patch("analysis.embeddings.requests.post", return_value=mock_resp):
-            result = embed_pending_units("key", batch_size=10)
+            result = embeddings.embed_pending_units("key", batch_size=10)
 
         assert result["total"] == 3
         assert result["done"] == 3
         assert result["failed"] == 0
         assert result["total_tokens"] == 15
         assert result["total_cost_usd"] > 0
+        assert result["embedding_model"] == embeddings._MODEL
+        assert result["embedding_dimensions"] == 1536
+
+        conn = duckdb.connect(embed_db.DB_PATH)
+        stored_cost = conn.execute(
+            "SELECT COALESCE(SUM(embedding_cost_usd), 0) FROM message_units"
+        ).fetchone()[0]
+        stored_models = {
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT embedding_model FROM message_units"
+            ).fetchall()
+        }
+        conn.close()
+        assert stored_cost == pytest.approx(result["total_cost_usd"])
+        assert stored_models == {embeddings._MODEL}
+
+    def test_embedding_model_is_the_model_used_for_the_request(self, embed_db, monkeypatch):
+        from analysis import embeddings
+
+        unit_id = _seed_pending_unit(embed_db)
+        requested_model = "text-embedding-test-model"
+        monkeypatch.setattr(embeddings, "_MODEL", requested_model)
+        seen = {}
+
+        def fake_post(*args, **kwargs):
+            seen["model"] = kwargs["json"]["model"]
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status.return_value = None
+            mock_resp.json.return_value = _openai_embed_response(["text"])
+            return mock_resp
+
+        with patch("analysis.embeddings.requests.post", side_effect=fake_post):
+            result = embeddings.embed_pending_units("key")
+
+        assert seen["model"] == requested_model
+        assert result["embedding_model"] == requested_model
 
         conn = duckdb.connect(embed_db.DB_PATH)
         stored = conn.execute(
-            "SELECT COALESCE(SUM(embedding_cost_usd), 0) FROM message_units"
+            "SELECT embedding_model FROM message_units WHERE unit_id = ?",
+            [unit_id],
         ).fetchone()[0]
         conn.close()
-        assert stored == pytest.approx(result["total_cost_usd"])
+        assert stored == requested_model
+
+    def test_unresolved_embedding_model_fails_without_writing(self, embed_db, monkeypatch):
+        from analysis import embeddings
+
+        unit_id = _seed_pending_unit(embed_db)
+        monkeypatch.setattr(embeddings, "_MODEL", "")
+
+        with patch("analysis.embeddings.requests.post") as post:
+            result = embeddings.embed_pending_units("key")
+
+        post.assert_not_called()
+        assert result["done"] == 0
+        assert result["failed"] == 1
+        assert result["total"] == 1
+        assert "Embedding model is not configured" in result["error"]
+
+        conn = duckdb.connect(embed_db.DB_PATH)
+        stored = conn.execute(
+            """
+            SELECT embedding, embedded_at, embedding_cost_usd, embedding_model
+            FROM message_units
+            WHERE unit_id = ?
+            """,
+            [unit_id],
+        ).fetchone()
+        conn.close()
+        assert stored == (None, None, None, None)
 
     def test_api_failure_returns_failed_count(self, embed_db):
         from analysis.embeddings import embed_pending_units
