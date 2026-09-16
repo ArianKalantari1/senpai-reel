@@ -115,7 +115,7 @@ def _create_all_tables(conn: duckdb.DuckDBPyConnection):
         extracted_at TIMESTAMP, model TEXT,
         extraction_run_id TEXT, prompt_version TEXT,
         embedding FLOAT[1536], embedded_at TIMESTAMP,
-        embedding_cost_usd DOUBLE
+        embedding_cost_usd DOUBLE, embedding_model TEXT
     )""")
     conn.execute("""
     CREATE TABLE IF NOT EXISTS generated_content (

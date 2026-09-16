@@ -7,6 +7,7 @@ Stores FLOAT[1536] in message_units.embedding.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from typing import List, Tuple
 
@@ -19,6 +20,23 @@ logger = logging.getLogger(__name__)
 _EMBED_COST_PER_TOKEN = 0.02 / 1_000_000
 _MODEL = "text-embedding-3-small"
 _BATCH_SIZE = 50
+
+
+@dataclass(frozen=True)
+class _EmbeddingBatchResult:
+    embeddings: List[List[float]]
+    total_tokens: int
+    total_cost: float
+    model: str
+    dimensions: int | None
+
+
+def _resolved_model() -> str:
+    if not isinstance(_MODEL, str) or not _MODEL.strip():
+        raise ValueError(
+            "Embedding model is not configured; refusing to write unattributed vectors."
+        )
+    return _MODEL.strip()
 
 
 def embed_text(text: str, api_key: str) -> List[float]:
@@ -34,16 +52,26 @@ def embed_batch(texts: List[str], api_key: str,
 
 def embed_batch_with_usage(texts: List[str], api_key: str,
                            dimensions: int | None = None) -> Tuple[List[List[float]], int, float]:
+    result = _embed_batch_with_metadata(texts, api_key, dimensions)
+    return result.embeddings, result.total_tokens, result.total_cost
+
+
+def _embed_batch_with_metadata(
+    texts: List[str],
+    api_key: str,
+    dimensions: int | None = None,
+) -> _EmbeddingBatchResult:
     """
     Batch-embed up to _BATCH_SIZE texts in a single API call.
     Automatically splits larger lists into sub-batches.
     """
     if not texts:
-        return [], 0, 0.0
+        return _EmbeddingBatchResult([], 0, 0.0, "", dimensions)
 
     all_embeddings: List[List[float]] = []
     total_tokens = 0
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    model = _resolved_model()
 
     for i in range(0, len(texts), _BATCH_SIZE):
         batch = texts[i : i + _BATCH_SIZE]
@@ -53,7 +81,7 @@ def embed_batch_with_usage(texts: List[str], api_key: str,
             # text-embedding-3-small returns 1536 dimensions unless asked for
             # fewer. The stored column dictates the width, so the caller passes
             # it rather than the model deciding and the write failing per row.
-            json=({"model": _MODEL, "input": batch}
+            json=({"model": model, "input": batch}
                   | ({"dimensions": dimensions} if dimensions else {})),
             timeout=60,
         )
@@ -65,7 +93,13 @@ def embed_batch_with_usage(texts: List[str], api_key: str,
         total_tokens += int(data.get("usage", {}).get("total_tokens") or 0)
 
     total_cost = round(total_tokens * _EMBED_COST_PER_TOKEN, 8)
-    return all_embeddings, total_tokens, total_cost
+    return _EmbeddingBatchResult(
+        all_embeddings,
+        total_tokens,
+        total_cost,
+        model,
+        dimensions,
+    )
 
 
 def embed_pending_units(
@@ -103,25 +137,29 @@ def embed_pending_units(
     total = len(rows)
 
     try:
-        embeddings, total_tokens, total_cost = embed_batch_with_usage(
+        batch_result = _embed_batch_with_metadata(
             texts, api_key, dimensions)
     except Exception as e:
         logger.error("Batch embedding failed: %s", e)
         return {"done": 0, "failed": total, "total": total, "error": str(e)}
 
+    embeddings = batch_result.embeddings
     conn = get_connection()
     done = failed = 0
-    unit_cost = round(total_cost / len(embeddings), 8) if embeddings else 0.0
+    unit_cost = round(batch_result.total_cost / len(embeddings), 8) if embeddings else 0.0
     try:
         for i, (unit_id, embedding) in enumerate(zip(unit_ids, embeddings)):
             try:
                 conn.execute(
                     """
                     UPDATE message_units
-                    SET embedding = ?, embedded_at = CURRENT_TIMESTAMP, embedding_cost_usd = ?
+                    SET embedding = ?,
+                        embedded_at = CURRENT_TIMESTAMP,
+                        embedding_cost_usd = ?,
+                        embedding_model = ?
                     WHERE unit_id = ?
                     """,
-                    [embedding, unit_cost, unit_id],
+                    [embedding, unit_cost, batch_result.model, unit_id],
                 )
                 done += 1
             except Exception as e:
@@ -136,6 +174,12 @@ def embed_pending_units(
         "done": done,
         "failed": failed,
         "total": total,
-        "total_tokens": total_tokens,
+        "total_tokens": batch_result.total_tokens,
         "total_cost_usd": round(unit_cost * done, 8),
+        "embedding_model": batch_result.model if done else None,
+        "embedding_dimensions": (
+            batch_result.dimensions
+            if batch_result.dimensions is not None
+            else (len(embeddings[0]) if done else None)
+        ),
     }
