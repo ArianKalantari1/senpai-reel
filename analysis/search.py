@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
+import core.db as db_mod
 from core.db import get_connection
-from analysis.embeddings import embed_text
+from analysis.embeddings import _MODEL as EMBEDDING_MODEL, embed_batch
+from tools.embed_units import embedding_dimension, width_of
 
 
 @dataclass
@@ -39,6 +41,30 @@ def _require_client_id(client_id: Optional[str]) -> str:
     return client_id
 
 
+def _message_units_has_column(conn, column: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = 'message_units'
+          AND column_name = ?
+        LIMIT 1
+        """,
+        [column],
+    ).fetchone()
+    return row is not None
+
+
+def _embedding_width_or_refuse() -> int:
+    width = embedding_dimension(db_mod.DB_PATH)
+    if width is None:
+        raise RuntimeError(
+            "Could not read a fixed width for message_units.embedding; "
+            "refusing to guess a query embedding dimension."
+        )
+    return width
+
+
 def semantic_search(
     query: str,
     openai_api_key: str,
@@ -64,12 +90,17 @@ def semantic_search(
         List of SearchResult sorted by cosine similarity descending
     """
     client_id = _require_client_id(client_id)
-    query_vec = embed_text(query, openai_api_key)
+    width = _embedding_width_or_refuse()
 
     conn = get_connection()
     try:
-        where_clauses = ["mu.embedding IS NOT NULL"]
-        where_params = []
+        if not _message_units_has_column(conn, "embedding_model"):
+            return []
+
+        query_vec = embed_batch([query], openai_api_key, dimensions=width)[0]
+
+        where_clauses = ["mu.embedding IS NOT NULL", "mu.embedding_model = ?"]
+        where_params = [EMBEDDING_MODEL]
 
         if topic_filter and topic_filter != "All":
             where_clauses.append("mu.topic = ?")
@@ -120,7 +151,7 @@ def semantic_search(
                 mu.content_type,
                 mu.text,
                 mu.claim,
-                list_cosine_similarity(mu.embedding, ?::FLOAT[1536]) AS score,
+                list_cosine_similarity(mu.embedding, ?::FLOAT[{width}]) AS score,
                 p.video_url,
                 CAST(p.posted_at AS TEXT) AS posted_at,
                 mu.unit_role

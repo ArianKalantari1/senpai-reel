@@ -6,7 +6,7 @@ import uuid
 import math
 import pytest
 import duckdb
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from datetime import datetime
 
 
@@ -31,6 +31,8 @@ def search_db(tmp_path):
     conn = duckdb.connect(db_mod.DB_PATH)
     now = datetime.utcnow()
     client_id = db_mod.DEFAULT_CLIENT_ID
+    embedding_model = "text-embedding-3-small"
+    conn.execute("ALTER TABLE message_units ADD COLUMN embedding_model TEXT")
 
     # Insert two creator accounts and posts first (for JOINs)
     conn.execute(
@@ -58,17 +60,17 @@ def search_db(tmp_path):
     conn.execute("""
         INSERT INTO message_units
             (unit_id, client_id, post_id, text, claim, topic, content_type, confidence,
-             extracted_at, model, embedding, embedded_at)
+             extracted_at, model, embedding, embedded_at, embedding_model)
         VALUES (?, ?, 'post_a', 'Resume keyword tips', 'Keywords matter', 'Resume', 'tip',
-                0.9, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
-    """, (uid_a, client_id, now, vec_a, now))
+                0.9, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?, ?)
+    """, (uid_a, client_id, now, vec_a, now, embedding_model))
     conn.execute("""
         INSERT INTO message_units
             (unit_id, client_id, post_id, text, claim, topic, content_type, confidence,
-             extracted_at, model, embedding, embedded_at)
+             extracted_at, model, embedding, embedded_at, embedding_model)
         VALUES (?, ?, 'post_b', 'Interview STAR method', 'Structure your answers', 'Interview', 'tip',
-                0.85, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?)
-    """, (uid_b, client_id, now, vec_b, now))
+                0.85, ?, 'gpt-4o-mini', ?::FLOAT[1536], ?, ?)
+    """, (uid_b, client_id, now, vec_b, now, embedding_model))
 
     conn.close()
     yield db_mod.DB_PATH, uid_a, uid_b, client_id
@@ -77,6 +79,67 @@ def search_db(tmp_path):
 
 def _client_id(search_db):
     return search_db[3]
+
+
+def _make_semantic_db(tmp_path, monkeypatch, embedding_type="FLOAT[512]",
+                      include_embedding_model=True):
+    import core.db as db_mod
+
+    db_path = str(tmp_path / "semantic_width.duckdb")
+    monkeypatch.setattr(db_mod, "DB_PATH", db_path)
+    conn = duckdb.connect(db_path)
+    model_column = ", embedding_model TEXT" if include_embedding_model else ""
+    try:
+        conn.execute("CREATE TABLE creator_accounts (account_id TEXT, username TEXT)")
+        conn.execute(
+            "CREATE TABLE posts (post_id TEXT, client_id TEXT, account_id TEXT, "
+            "video_url TEXT, posted_at TIMESTAMP)"
+        )
+        conn.execute("CREATE TABLE client_posts (client_id TEXT, post_id TEXT, added_at TIMESTAMP)")
+        conn.execute(
+            f"""
+            CREATE TABLE message_units (
+                unit_id TEXT,
+                client_id TEXT,
+                post_id TEXT,
+                text TEXT,
+                claim TEXT,
+                topic TEXT,
+                content_type TEXT,
+                confidence DOUBLE,
+                embedding {embedding_type},
+                unit_role TEXT
+                {model_column}
+            )
+            """
+        )
+        conn.execute("INSERT INTO creator_accounts VALUES ('acc1', 'user1')")
+        conn.execute(
+            "INSERT INTO posts VALUES ('post_a', 'client_a', 'acc1', 'http://vid', now())"
+        )
+        conn.execute("INSERT INTO client_posts VALUES ('client_a', 'post_a', now())")
+    finally:
+        conn.close()
+    return db_path
+
+
+def _insert_semantic_unit(db_path, unit_id, vector, embedding_type="FLOAT[512]",
+                          embedding_model="text-embedding-3-small"):
+    conn = duckdb.connect(db_path)
+    try:
+        conn.execute(
+            f"""
+            INSERT INTO message_units (
+                unit_id, client_id, post_id, text, claim, topic, content_type,
+                confidence, embedding, unit_role, embedding_model
+            )
+            VALUES (?, 'client_a', 'post_a', 'semantic text', 'semantic claim',
+                    'Resume', 'tip', 0.9, ?::{embedding_type}, NULL, ?)
+            """,
+            [unit_id, vector, embedding_model],
+        )
+    finally:
+        conn.close()
 
 
 # ── keyword_search ─────────────────────────────────────────────────────────────
@@ -127,10 +190,81 @@ class TestKeywordSearch:
 # ── semantic_search ───────────────────────────────────────────────────────────
 
 class TestSemanticSearch:
-    def _mock_embed(self, vec):
-        """Return a mock embed_text that returns vec."""
-        mock = MagicMock(return_value=vec)
-        return mock
+    def test_query_embedding_uses_declared_512_width(self, tmp_path, monkeypatch):
+        from analysis import search
+
+        db_path = _make_semantic_db(tmp_path, monkeypatch, embedding_type="FLOAT[512]")
+        vector = [1.0] + [0.0] * 511
+        _insert_semantic_unit(db_path, "u512", vector, embedding_type="FLOAT[512]")
+
+        seen = {}
+
+        def fake_embed(texts, api_key, dimensions=None):
+            seen["texts"] = texts
+            seen["api_key"] = api_key
+            seen["dimensions"] = dimensions
+            return [vector]
+
+        monkeypatch.setattr(search, "embed_batch", fake_embed)
+
+        results = search.semantic_search("resume tips", "fake_key", "client_a", top_k=5)
+
+        assert seen["dimensions"] == 512
+        assert seen["texts"] == ["resume tips"]
+        assert results[0].unit_id == "u512"
+
+    def test_variable_width_embedding_column_refuses_before_embedding(self, tmp_path, monkeypatch):
+        from analysis import search
+
+        _make_semantic_db(tmp_path, monkeypatch, embedding_type="FLOAT[]")
+
+        def fail_embed(*_args, **_kwargs):
+            pytest.fail("embedded a query without a declared column width")
+
+        monkeypatch.setattr(search, "embed_batch", fail_embed)
+
+        with pytest.raises(RuntimeError) as exc:
+            search.semantic_search("resume tips", "fake_key", "client_a", top_k=5)
+
+        assert "refusing to guess" in str(exc.value)
+
+    def test_float4_width_parser_reads_the_bracketed_width(self):
+        from analysis.search import width_of
+
+        assert width_of("FLOAT4[512]") == 512
+        assert width_of("FLOAT4") is None
+
+    def test_null_embedding_model_rows_are_not_ranked(self, search_db):
+        from analysis.search import semantic_search
+
+        db_path, _uid_a, _uid_b, client_id = search_db
+        conn = duckdb.connect(db_path)
+        try:
+            conn.execute("""
+                INSERT INTO posts (post_id, client_id, account_id, engagement_rate,
+                                   download_status, scraped_at, hashtags, mentions, video_url)
+                VALUES ('post_null_model', ?, 'acc1', 5.0, 'done', now(), [], [], 'http://vid_null')
+            """, [client_id])
+            conn.execute(
+                "INSERT INTO client_posts (client_id, post_id, added_at) VALUES (?, 'post_null_model', now())",
+                [client_id],
+            )
+            conn.execute("""
+                INSERT INTO message_units
+                    (unit_id, client_id, post_id, text, claim, topic, content_type,
+                     confidence, extracted_at, model, embedding, embedded_at, embedding_model)
+                VALUES ('null_model', ?, 'post_null_model', 'Exact query match',
+                        'Unknown model vector', 'Resume', 'tip', 0.99, now(),
+                        'gpt-4o-mini', ?::FLOAT[1536], now(), NULL)
+            """, [client_id, [1.0] + [0.0] * 1535])
+        finally:
+            conn.close()
+
+        query_vec = [1.0] + [0.0] * 1535
+        with patch("analysis.search.embed_batch", return_value=[query_vec]):
+            results = semantic_search("resume tips", "fake_key", client_id, top_k=10)
+
+        assert "null_model" not in {result.unit_id for result in results}
 
     def test_query_aligned_with_unit_a_scores_higher(self, search_db):
         """
@@ -141,7 +275,7 @@ class TestSemanticSearch:
         dim = 1536
         query_vec = [1.0] + [0.0] * (dim - 1)
 
-        with patch("analysis.search.embed_text", return_value=query_vec):
+        with patch("analysis.search.embed_batch", return_value=[query_vec]):
             results = semantic_search("resume tips", "fake_key", _client_id(search_db), top_k=10)
 
         assert len(results) >= 2
@@ -155,7 +289,7 @@ class TestSemanticSearch:
         dim = 1536
         query_vec = [1.0] + [0.0] * (dim - 1)
 
-        with patch("analysis.search.embed_text", return_value=query_vec):
+        with patch("analysis.search.embed_batch", return_value=[query_vec]):
             results = semantic_search(
                 "anything",
                 "fake_key",
@@ -172,7 +306,7 @@ class TestSemanticSearch:
         dim = 1536
         query_vec = [0.5] + [0.5] + [0.0] * (1534)
 
-        with patch("analysis.search.embed_text", return_value=query_vec):
+        with patch("analysis.search.embed_batch", return_value=[query_vec]):
             results = semantic_search(
                 "test",
                 "k",
@@ -189,7 +323,7 @@ class TestSemanticSearch:
         dim = 1536
         query_vec = [1.0] + [0.0] * (dim - 1)
 
-        with patch("analysis.search.embed_text", return_value=query_vec):
+        with patch("analysis.search.embed_batch", return_value=[query_vec]):
             results = semantic_search("test", "k", _client_id(search_db), top_k=5)
 
         assert len(results) >= 2
@@ -213,7 +347,7 @@ class TestSemanticSearch:
         db_mod.init_db()
 
         dim = 1536
-        with patch("analysis.search.embed_text", return_value=[0.0] * dim):
+        with patch("analysis.search.embed_batch", return_value=[[0.0] * dim]):
             results = semantic_search("anything", "key", db_mod.DEFAULT_CLIENT_ID, top_k=5)
 
         assert results == []
@@ -223,7 +357,7 @@ class TestSemanticSearch:
         from analysis.search import semantic_search
         with pytest.raises(TypeError):
             semantic_search("resume", "fake_key")
-        with patch("analysis.search.embed_text") as embed_mock:
+        with patch("analysis.search.embed_batch") as embed_mock:
             with pytest.raises(ValueError):
                 semantic_search("resume", "fake_key", "")
         embed_mock.assert_not_called()
@@ -267,7 +401,7 @@ class TestSearchCarriesUnitRole:
         self._set_role(db_path, uid_a, "technique")
 
         query_vec = [1.0] + [0.0] * 1535
-        with patch("analysis.search.embed_text", return_value=query_vec):
+        with patch("analysis.search.embed_batch", return_value=[query_vec]):
             results = semantic_search("test", "k", client_id, top_k=5)
 
         by_id = {r.unit_id: r for r in results}
