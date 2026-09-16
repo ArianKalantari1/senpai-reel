@@ -273,3 +273,61 @@ def test_a_unit_whose_post_is_not_in_client_posts_is_invisible(gaps_db):
     assert row["posts"] == 1, "a post outside client_posts was counted"
     assert row["units"] == 1
     assert row["median_engagement"] == 5.0, "the orphan post's engagement leaked in"
+
+
+def _set_subtopics(db_path, pairs):
+    conn = duckdb.connect(db_path)
+    try:
+        for unit_id, sub in pairs:
+            conn.execute("UPDATE message_units SET subtopic = ? WHERE unit_id = ?",
+                         [sub, unit_id])
+    finally:
+        conn.close()
+
+
+class TestSubtopicGrouping:
+    """The finer grain the extractor already records.
+
+    At topic level, 15 accounts cover nearly every topic on the real corpus and
+    engagement spans 3.2-5.0% — there is no gap visible because the taxonomy is
+    too coarse. "Interview" is saturated; "the STAR method, explained properly"
+    is the actual question, and it lives one level down.
+    """
+
+    def test_grouping_by_subtopic_splits_a_saturated_topic(self, gaps_db):
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Interview",
+              ["Use the STAR method to structure answers"], 9.0)
+        _seed(gaps_db, "c1", "a2", "p2", "Interview",
+              ["Research the company before you go in"], 1.0)
+        _set_subtopics(gaps_db, [("p1_u0", "star_method"), ("p2_u0", "research")])
+
+        by_topic = tg.topic_rows(tg.load_rows(gaps_db, "c1", "topic"), 0.70)
+        by_sub = tg.topic_rows(tg.load_rows(gaps_db, "c1", "subtopic"), 0.70)
+
+        assert [r["topic"] for r in by_topic] == ["Interview"]
+        assert sorted(r["topic"] for r in by_sub) == ["research", "star_method"]
+        # The split is the point: one topic at 5% median hides a 9% and a 1%.
+        assert by_topic[0]["median_engagement"] == 5.0
+        assert {r["median_engagement"] for r in by_sub} == {9.0, 1.0}
+
+    def test_a_null_subtopic_is_unclassified_not_dropped(self, gaps_db):
+        """Absent is not absent-from-the-report.
+
+        Silently dropping units with no subtopic would shrink the corpus
+        without saying so, and the reader would never know the denominator
+        moved.
+        """
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Interview", ["A claim with no subtopic"], 5.0)
+
+        rows = tg.topic_rows(tg.load_rows(gaps_db, "c1", "subtopic"), 0.70)
+
+        assert [r["topic"] for r in rows] == ["(unclassified)"]
+        assert rows[0]["units"] == 1
+
+    def test_an_unknown_level_is_refused_rather_than_interpolated(self, gaps_db):
+        tg = _tg()
+        with pytest.raises(SystemExit) as exc:
+            tg.load_rows(gaps_db, "c1", "claim")
+        assert "topic or subtopic" in str(exc.value)

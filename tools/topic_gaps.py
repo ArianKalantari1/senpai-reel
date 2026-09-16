@@ -6,7 +6,8 @@ find a gap, because "nobody talks about X" and "nobody cares about X" look
 identical from the supply side. This tool joins supply to the one demand
 signal already in the database: the engagement of the posts a topic appears in.
 
-    topic_gaps.py <db> --client CLIENT [--dedupe-threshold 0.70]
+    topic_gaps.py <db> --client CLIENT [--by topic|subtopic]
+                                       [--dedupe-threshold 0.70]
 
 A gap is the combination the columns are arranged to show: engagement is high,
 distinct accounts are few, and the ideas behind those accounts are fewer still.
@@ -80,7 +81,7 @@ def _require_schema(conn, db_path: str) -> None:
         )
 
 
-def load_rows(db_path: str, client_id: str) -> list[tuple]:
+def load_rows(db_path: str, client_id: str, level: str = "topic") -> list[tuple]:
     """(topic, account, post_id, unit_id, claim, engagement_rate, embedding)."""
     conn = _connect(db_path)
     try:
@@ -91,10 +92,12 @@ def load_rows(db_path: str, client_id: str) -> list[tuple]:
         account = "COALESCE(ca.username, p.account_id, 'unknown')" if has_accounts else \
                   "COALESCE(p.account_id, 'unknown')"
         join = "LEFT JOIN creator_accounts ca ON ca.account_id = p.account_id" if has_accounts else ""
+        if level not in ("topic", "subtopic"):
+            raise SystemExit(f"--by must be topic or subtopic, not {level!r}")
         return conn.execute(
             f"""
             SELECT
-                COALESCE(NULLIF(TRIM(mu.topic), ''), 'Unclassified') AS topic,
+                COALESCE(NULLIF(TRIM(mu.{level}), ''), '(unclassified)') AS topic,
                 {account} AS account,
                 p.post_id,
                 mu.unit_id,
@@ -220,13 +223,14 @@ def _pct(value: float | None) -> str:
     return UNKNOWN if value is None else f"{value:.2f}%"
 
 
-def cmd_report(db_path: str, client_id: str, threshold: float) -> int:
-    rows = load_rows(db_path, client_id)
+def cmd_report(db_path: str, client_id: str, threshold: float,
+               level: str = "topic") -> int:
+    rows = load_rows(db_path, client_id, level)
     if not rows:
         raise SystemExit(f"\n  No client-visible units found for {client_id!r}.\n")
 
     topics = topic_rows(rows, threshold)
-    print(f"\nTopic supply vs engagement — client {client_id}")
+    print(f"\n{level.capitalize()} supply vs engagement — client {client_id}")
     measures = {r["measure"] for r in topics}
     print(f"  Ideas collapse near-duplicate claims at >= {threshold:.2f}, "
           f"by {' and '.join(sorted(measures))}.")
@@ -237,7 +241,7 @@ def cmd_report(db_path: str, client_id: str, threshold: float) -> int:
         print("  Embed the units (analysis/embeddings.py) for a real figure.")
     print("  Engagement is the median across posts with a known rate; topics")
     print("  where none is known read 'no data' rather than 0.\n")
-    print(f"  {'topic':<18}{'accts':>6}{'posts':>7}{'units':>7}{'ideas':>7}"
+    print(f"  {level[:18]:<18}{'accts':>6}{'posts':>7}{'units':>7}{'ideas':>7}"
           f"{'units/idea':>12}{'median engagement':>20}{'known':>8}")
     for r in topics:
         per_idea = f"{r['units'] / r['ideas']:.1f}" if r["ideas"] else UNKNOWN
@@ -246,7 +250,7 @@ def cmd_report(db_path: str, client_id: str, threshold: float) -> int:
               f"{r['ideas']:>7}{per_idea:>12}{_pct(r['median_engagement']):>20}{known:>8}")
 
     measured = [r for r in topics if r["median_engagement"] is not None]
-    print(f"\n  {len(topics)} topic(s); {len(measured)} with any engagement data.")
+    print(f"\n  {len(topics)} {level}(s); {len(measured)} with any engagement data.")
     if measured:
         print("  Look for high engagement with few accounts and fewer ideas —")
         print("  that is loud demand meeting thin, repetitive supply.")
@@ -265,11 +269,14 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("db")
     parser.add_argument("--client", required=True)
+    parser.add_argument("--by", choices=("topic", "subtopic"), default="topic",
+                        help="grouping level; subtopic is the finer grain the "
+                             "extractor already records")
     parser.add_argument("--dedupe-threshold", type=float, default=DEFAULT_DEDUPE_THRESHOLD)
     args = parser.parse_args(argv)
     if not 0 < args.dedupe_threshold <= 1:
         raise SystemExit("--dedupe-threshold must be between 0 and 1.")
-    return cmd_report(args.db, args.client, args.dedupe_threshold)
+    return cmd_report(args.db, args.client, args.dedupe_threshold, args.by)
 
 
 if __name__ == "__main__":
