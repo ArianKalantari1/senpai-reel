@@ -190,6 +190,70 @@ def distinct_ideas(claims: list[str], threshold: float,
     return len(kept), "stem overlap"
 
 
+DEFAULT_CLUSTER_THRESHOLD = 0.62
+
+
+def _mean_vector(vectors: list) -> list | None:
+    usable = [v for v in vectors if v is not None and len(v)]
+    if not usable:
+        return None
+    width = len(usable[0])
+    if any(len(v) != width for v in usable):
+        return None
+    return [sum(v[i] for v in usable) / len(usable) for i in range(width)]
+
+
+def cluster_subtopics(rows: list[tuple], threshold: float) -> dict[str, str]:
+    """Collapse free-text subtopics into interpretable coverage categories.
+
+    `subtopic` is not a taxonomy. The real corpus has 2,156 distinct values
+    across 5,361 units — about 2.5 units each, and most are a single unit from
+    a single post. It is a free-text label, so it cannot support counting:
+    topic gives 11 buckets, subtopic gives 2,156, and the grain a coverage
+    question needs is between them.
+
+    Each subtopic becomes the mean of its units' embeddings. Clusters are
+    seeded from the subtopics carrying the most POSTS — the biggest seed is
+    the most recognisable name for the group, and naming a cluster after a
+    one-post label would be unreadable. Everything else joins its nearest seed
+    above the threshold, or stands alone.
+
+    A subtopic whose units have no embeddings cannot be placed and is returned
+    mapped to itself rather than guessed into a cluster or dropped. Guessing
+    would put unrelated material under a category name; dropping would shrink
+    the corpus without saying so.
+    """
+    per_subtopic: dict[str, dict] = {}
+    for subtopic, _account, post_id, _unit_id, _claim, _eng, embedding in rows:
+        entry = per_subtopic.setdefault(subtopic, {"posts": set(), "vectors": []})
+        entry["posts"].add(post_id)
+        if embedding is not None:
+            entry["vectors"].append(list(embedding))
+
+    centroids = {name: _mean_vector(e["vectors"]) for name, e in per_subtopic.items()}
+    ordered = sorted(per_subtopic,
+                     key=lambda n: (-len(per_subtopic[n]["posts"]), n))
+
+    seeds: list[tuple[str, list]] = []
+    mapping: dict[str, str] = {}
+    for name in ordered:
+        vector = centroids[name]
+        if vector is None:
+            mapping[name] = name
+            continue
+        best_name, best_score = None, threshold
+        for seed_name, seed_vector in seeds:
+            score = _cosine(vector, seed_vector)
+            if score >= best_score:
+                best_name, best_score = seed_name, score
+        if best_name is None:
+            seeds.append((name, vector))
+            mapping[name] = name
+        else:
+            mapping[name] = best_name
+    return mapping
+
+
 def topic_rows(rows: list[tuple], threshold: float) -> list[dict]:
     grouped: dict[str, dict] = {}
     for topic, account, post_id, _unit_id, claim, engagement, embedding in rows:
@@ -230,10 +294,25 @@ def topic_rows(rows: list[tuple], threshold: float) -> list[dict]:
             "engagement_known": len(values),
             "engagement_implausible": len(g["implausible"]),
         })
-    # Unknown engagement sorts last rather than sorting as zero.
-    out.sort(key=lambda r: (r["median_engagement"] is None,
-                            -(r["median_engagement"] or 0.0), r["topic"]))
     return out
+
+
+def sort_rows(rows: list[dict], sort_by: str) -> list[dict]:
+    """Coverage first by default.
+
+    Engagement rate on Instagram is largely a property of the ACCOUNT — larger
+    followings produce lower percentages mechanically — so a topic's figure is
+    substantially "which accounts happened to cover it". Ranking by it looked
+    like measuring audience demand and was closer to measuring account size.
+    Coverage answers the question actually being asked: how many distinct
+    voices are already saying this.
+    """
+    if sort_by == "engagement":
+        # Unknown sorts last rather than sorting as zero.
+        return sorted(rows, key=lambda r: (r["median_engagement"] is None,
+                                           -(r["median_engagement"] or 0.0),
+                                           r["topic"]))
+    return sorted(rows, key=lambda r: (-r["accounts"], -r["posts"], r["topic"]))
 
 
 def _pct(value: float | None) -> str:
@@ -241,12 +320,19 @@ def _pct(value: float | None) -> str:
 
 
 def cmd_report(db_path: str, client_id: str, threshold: float,
-               level: str = "topic", min_posts: int = 1) -> int:
-    rows = load_rows(db_path, client_id, level)
+               level: str = "topic", min_posts: int = 1,
+               cluster_threshold: float = DEFAULT_CLUSTER_THRESHOLD,
+               sort_by: str = "coverage") -> int:
+    clustered = level == "cluster"
+    rows = load_rows(db_path, client_id, "subtopic" if clustered else level)
     if not rows:
         raise SystemExit(f"\n  No client-visible units found for {client_id!r}.\n")
 
-    topics = topic_rows(rows, threshold)
+    if clustered:
+        mapping = cluster_subtopics(rows, cluster_threshold)
+        rows = [(mapping.get(r[0], r[0]),) + tuple(r[1:]) for r in rows]
+
+    topics = sort_rows(topic_rows(rows, threshold), sort_by)
     # One post's engagement is an anecdote. Ranking by it puts whatever single
     # video went viral at the top of a report about market structure: the real
     # corpus produced five different subtopics all reading 135.71%, which is
@@ -307,10 +393,19 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("db")
     parser.add_argument("--client", required=True)
-    parser.add_argument("--by", choices=("topic", "subtopic"), default="topic",
-                        help="grouping level; subtopic is the finer grain the "
-                             "extractor already records")
+    parser.add_argument("--by", choices=("topic", "subtopic", "cluster"),
+                        default="topic",
+                        help="grouping level; subtopic is the extractor's raw "
+                             "free-text label, cluster groups those by embedding")
     parser.add_argument("--dedupe-threshold", type=float, default=DEFAULT_DEDUPE_THRESHOLD)
+    parser.add_argument("--cluster-threshold", type=float,
+                        default=DEFAULT_CLUSTER_THRESHOLD,
+                        help="cosine similarity at which two subtopics are the "
+                             "same category")
+    parser.add_argument("--sort", choices=("coverage", "engagement"),
+                        default="coverage",
+                        help="coverage sorts by how many distinct accounts cover "
+                             "it; engagement is confounded by account size")
     parser.add_argument("--min-posts", type=int, default=1,
                         help="hide rows with fewer posts; one post's engagement "
                              "is an anecdote, not a rate")
@@ -319,8 +414,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--dedupe-threshold must be between 0 and 1.")
     if args.min_posts < 1:
         raise SystemExit("--min-posts must be at least 1.")
+    if not 0 < args.cluster_threshold <= 1:
+        raise SystemExit("--cluster-threshold must be between 0 and 1.")
     return cmd_report(args.db, args.client, args.dedupe_threshold, args.by,
-                      args.min_posts)
+                      args.min_posts, args.cluster_threshold, args.sort)
 
 
 if __name__ == "__main__":

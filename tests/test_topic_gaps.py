@@ -88,12 +88,13 @@ class TestUnknownEngagementIsNotZero:
         _seed(gaps_db, "c1", "a1", "p1", "Known", ["A claim about something"], 1.0)
         _seed(gaps_db, "c1", "a2", "p2", "Unknown", ["A different claim entirely"], None)
 
-        order = [r["topic"] for r in tg.topic_rows(tg.load_rows(gaps_db, "c1"), 0.70)]
+        rows = tg.topic_rows(tg.load_rows(gaps_db, "c1"), 0.70)
+        order = [r["topic"] for r in tg.sort_rows(rows, "engagement")]
 
-        # A 1.0% topic still outranks one with no data. Sorting unknown as 0
-        # happens to give the same order here, so the value is asserted too.
+        # Must go through sort_rows: topic_rows no longer orders its output,
+        # so asserting on it would pass on dict insertion order alone.
         assert order == ["Known", "Unknown"]
-        assert tg.topic_rows(tg.load_rows(gaps_db, "c1"), 0.70)[1]["median_engagement"] is None
+        assert {r["topic"]: r["median_engagement"] for r in rows}["Unknown"] is None
 
 
 class TestCountingIdeasNotUnits:
@@ -402,3 +403,132 @@ class TestMinimumObservations:
             tg.cmd_report(gaps_db, "c1", 0.70, "topic", 50)
 
         assert "The most any has is 1" in str(exc.value)
+
+
+def _embed(db_path, unit_id, vector):
+    conn = duckdb.connect(db_path)
+    try:
+        conn.execute("UPDATE message_units SET embedding = ?::FLOAT[1536] "
+                     "WHERE unit_id = ?", [vector, unit_id])
+    finally:
+        conn.close()
+
+
+def _vec(*leading):
+    return list(leading) + [0.0] * (1536 - len(leading))
+
+
+class TestClusteringSubtopics:
+    """subtopic is a free-text label, not a taxonomy.
+
+    2,156 distinct values across 5,361 units on the real corpus — about 2.5
+    units each, most of them one unit from one post. Topic gives 11 buckets;
+    the grain a coverage question needs is between them.
+    """
+
+    def test_near_identical_subtopics_collapse_into_one_category(self, gaps_db):
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Salary", ["Ask for more money"], 4.0)
+        _seed(gaps_db, "c1", "a2", "p2", "Salary", ["Negotiate your offer"], 4.0)
+        _set_subtopics(gaps_db, [("p1_u0", "salary_negotiation"),
+                                 ("p2_u0", "negotiating_pay")])
+        _embed(gaps_db, "p1_u0", _vec(1.0, 0.0))
+        _embed(gaps_db, "p2_u0", _vec(0.99, 0.14))
+
+        mapping = tg.cluster_subtopics(tg.load_rows(gaps_db, "c1", "subtopic"), 0.62)
+
+        assert len(set(mapping.values())) == 1, mapping
+
+    def test_unrelated_subtopics_stay_separate(self, gaps_db):
+        tg = _tg()
+        _seed(gaps_db, "c1", "a1", "p1", "Salary", ["Ask for more money"], 4.0)
+        _seed(gaps_db, "c1", "a2", "p2", "Visa", ["Sponsorship rules changed"], 4.0)
+        _set_subtopics(gaps_db, [("p1_u0", "salary_negotiation"), ("p2_u0", "visa_rules")])
+        _embed(gaps_db, "p1_u0", _vec(1.0, 0.0))
+        _embed(gaps_db, "p2_u0", _vec(0.0, 1.0))
+
+        mapping = tg.cluster_subtopics(tg.load_rows(gaps_db, "c1", "subtopic"), 0.62)
+
+        assert len(set(mapping.values())) == 2, mapping
+
+    def test_clusters_are_named_after_their_largest_member(self, gaps_db):
+        """A category named after a one-post label is unreadable."""
+        tg = _tg()
+        for n in range(3):
+            _seed(gaps_db, "c1", "a1", f"big{n}", "Salary",
+                  [f"Negotiation point number {n}"], 4.0)
+            _set_subtopics(gaps_db, [(f"big{n}_u0", "salary_negotiation")])
+            _embed(gaps_db, f"big{n}_u0", _vec(1.0, 0.0))
+        _seed(gaps_db, "c1", "a2", "small", "Salary", ["One more pay point"], 4.0)
+        _set_subtopics(gaps_db, [("small_u0", "obscure_pay_label")])
+        _embed(gaps_db, "small_u0", _vec(0.99, 0.14))
+
+        mapping = tg.cluster_subtopics(tg.load_rows(gaps_db, "c1", "subtopic"), 0.62)
+
+        assert mapping["obscure_pay_label"] == "salary_negotiation"
+
+    def test_an_unembedded_subtopic_maps_to_itself_rather_than_being_guessed(self, gaps_db):
+        """Absent is not 'close enough to something'.
+
+        Forcing an unplaceable subtopic into a cluster would file unrelated
+        material under a category name, and dropping it would shrink the
+        corpus without saying so.
+        """
+        tg = _tg()
+        # The embedded subtopic must be the BIGGEST, so that mapping the
+        # unembedded one to the first seed would be a visible mistake. With
+        # both at one post the ordering is alphabetical and the two outcomes
+        # coincide — a mutation forcing it into the first cluster survived
+        # that fixture.
+        for n in range(3):
+            _seed(gaps_db, "c1", "a1", f"big{n}", "Salary", [f"Pay point {n}"], 4.0)
+            _set_subtopics(gaps_db, [(f"big{n}_u0", "salary_negotiation")])
+            _embed(gaps_db, f"big{n}_u0", _vec(1.0, 0.0))
+        _seed(gaps_db, "c1", "a2", "p2", "Salary", ["Another pay claim"], 4.0)
+        _set_subtopics(gaps_db, [("p2_u0", "no_vector")])
+
+        mapping = tg.cluster_subtopics(tg.load_rows(gaps_db, "c1", "subtopic"), 0.62)
+
+        assert mapping["salary_negotiation"] == "salary_negotiation"
+        assert mapping["no_vector"] == "no_vector"
+
+
+class TestSortingDefaultsToCoverage:
+    def test_coverage_sort_ranks_by_distinct_accounts_not_engagement(self):
+        """Engagement rate is largely a property of the account, not the topic.
+
+        Larger followings produce lower percentages mechanically, so a topic's
+        figure is substantially "which accounts happened to cover it".
+        """
+        tg = _tg()
+        rows = [
+            {"topic": "Wide", "accounts": 9, "posts": 20, "median_engagement": 1.0},
+            {"topic": "Narrow", "accounts": 2, "posts": 3, "median_engagement": 9.0},
+        ]
+
+        assert [r["topic"] for r in tg.sort_rows(rows, "coverage")] == ["Wide", "Narrow"]
+        assert [r["topic"] for r in tg.sort_rows(rows, "engagement")] == ["Narrow", "Wide"]
+
+
+class TestMeanVector:
+    """Tested directly: the embedding column is fixed-width, so mixed widths
+    cannot arise through the database today. They can arise the moment a
+    second embedding provider is used — creative-director-ai#29 records a
+    Voyage adapter at 512 dimensions against a FLOAT[1536] column, with the
+    resize migration never written. Averaging across widths would produce a
+    vector that is meaningless rather than wrong in any detectable way.
+    """
+
+    def test_vectors_of_different_widths_refuse_to_average(self):
+        tg = _tg()
+        assert tg._mean_vector([[1.0, 0.0], [1.0, 0.0, 0.0]]) is None
+
+    def test_all_missing_returns_none_rather_than_a_zero_vector(self):
+        tg = _tg()
+        assert tg._mean_vector([None, None]) is None
+        assert tg._mean_vector([]) is None
+
+    def test_missing_vectors_are_skipped_not_counted_as_origins(self):
+        tg = _tg()
+        # Counting None as [0, 0] would halve the mean.
+        assert tg._mean_vector([[2.0, 4.0], None]) == [2.0, 4.0]
