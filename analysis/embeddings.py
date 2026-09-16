@@ -26,12 +26,14 @@ def embed_text(text: str, api_key: str) -> List[float]:
     return embed_batch([text], api_key)[0]
 
 
-def embed_batch(texts: List[str], api_key: str) -> List[List[float]]:
-    embeddings, _, _ = embed_batch_with_usage(texts, api_key)
+def embed_batch(texts: List[str], api_key: str,
+                dimensions: int | None = None) -> List[List[float]]:
+    embeddings, _, _ = embed_batch_with_usage(texts, api_key, dimensions)
     return embeddings
 
 
-def embed_batch_with_usage(texts: List[str], api_key: str) -> Tuple[List[List[float]], int, float]:
+def embed_batch_with_usage(texts: List[str], api_key: str,
+                           dimensions: int | None = None) -> Tuple[List[List[float]], int, float]:
     """
     Batch-embed up to _BATCH_SIZE texts in a single API call.
     Automatically splits larger lists into sub-batches.
@@ -48,7 +50,11 @@ def embed_batch_with_usage(texts: List[str], api_key: str) -> Tuple[List[List[fl
         resp = requests.post(
             "https://api.openai.com/v1/embeddings",
             headers=headers,
-            json={"model": _MODEL, "input": batch},
+            # text-embedding-3-small returns 1536 dimensions unless asked for
+            # fewer. The stored column dictates the width, so the caller passes
+            # it rather than the model deciding and the write failing per row.
+            json=({"model": _MODEL, "input": batch}
+                  | ({"dimensions": dimensions} if dimensions else {})),
             timeout=60,
         )
         if resp.status_code == 401:
@@ -67,6 +73,7 @@ def embed_pending_units(
     batch_size: int = 50,
     progress_callback=None,
     client_id: str = DEFAULT_CLIENT_ID,
+    dimensions: int | None = None,
 ) -> dict:
     """
     Embed all message_units that don't have an embedding yet.
@@ -96,7 +103,8 @@ def embed_pending_units(
     total = len(rows)
 
     try:
-        embeddings, total_tokens, total_cost = embed_batch_with_usage(texts, api_key)
+        embeddings, total_tokens, total_cost = embed_batch_with_usage(
+            texts, api_key, dimensions)
     except Exception as e:
         logger.error("Batch embedding failed: %s", e)
         return {"done": 0, "failed": total, "total": total, "error": str(e)}

@@ -32,6 +32,48 @@ from analysis.extraction import OutOfCreditError, RateLimitedError  # noqa: E402
 from core.config import get_secret  # noqa: E402
 
 DEFAULT_BATCH = 50
+# What text-embedding-3-small returns unless a narrower width is requested.
+MODEL_NATIVE_DIMENSIONS = 1536
+
+
+def embedding_dimension(db_path: str) -> int | None:
+    """The width message_units.embedding actually holds, or None if unreadable.
+
+    The repo schema declares FLOAT[1536]. A real database was found declaring
+    FLOAT[512] — the resize that creative-director-ai#29 records as never
+    written had in fact been applied somewhere, and the code had no idea. Every
+    write failed with a per-row cast error while the loop kept paying for more.
+    """
+    import duckdb
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = 'message_units' AND column_name = 'embedding'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return width_of(row[0] if row else None)
+
+
+def width_of(data_type: str | None) -> int | None:
+    """Fixed array width from a DuckDB type string, or None if it has none.
+
+    Only a bracketed number counts. DuckDB reports REAL as FLOAT4, so a looser
+    search for any digit would read FLOAT4[512] as a 4-wide column and then
+    request four-dimension vectors from the API — wrong, and wrong in a way
+    that still writes successfully into the wrong shape.
+
+    FLOAT[] — a variable-length list — has no declared width, and that is a
+    None rather than a guess.
+    """
+    import re
+
+    if not data_type:
+        return None
+    match = re.search(r"\[(\d+)\]", str(data_type))
+    return int(match.group(1)) if match else None
 
 
 def pending_count(db_path: str, client_id: str) -> tuple[int, int]:
@@ -71,6 +113,19 @@ def cmd_run(db_path: str, client_id: str, limit: int | None, dry_run: bool) -> i
               "Nothing was sent and nothing was written.\n")
         return 0
 
+    width = embedding_dimension(db_path)
+    if width is None:
+        raise SystemExit(
+            "\n  Could not read the width of message_units.embedding, so this "
+            "would\n  guess at what the column accepts. Refusing to spend on a "
+            "guess.\n")
+    print(f"  Column holds FLOAT[{width}]; requesting {width}-dimension vectors.")
+    if width != MODEL_NATIVE_DIMENSIONS:
+        print(f"  NOTE: the model's native width is {MODEL_NATIVE_DIMENSIONS}. "
+              f"Vectors are being\n        truncated to {width} by the API, which "
+              "is supported but means these\n        vectors are NOT comparable "
+              "with any stored at a different width.")
+
     api_key = get_secret("OPENAI_API_KEY").strip()
     if not api_key:
         raise SystemExit("\n  OPENAI_API_KEY is required to embed units.\n")
@@ -85,7 +140,8 @@ def cmd_run(db_path: str, client_id: str, limit: int | None, dry_run: bool) -> i
                 break
             try:
                 result = embed_pending_units(api_key, batch_size=DEFAULT_BATCH,
-                                             client_id=client_id)
+                                             client_id=client_id,
+                                             dimensions=width)
             except OutOfCreditError as exc:
                 print(f"\n  {exc}")
                 break
@@ -94,13 +150,16 @@ def cmd_run(db_path: str, client_id: str, limit: int | None, dry_run: bool) -> i
                 break
             if not result["total"]:
                 break
-            if not result["done"] and not result["failed"]:
-                # A batch reporting units but resolving none of them would loop
-                # against the API forever. The tool cannot tell whether the
-                # caller is stuck or the rows are unembeddable, so it stops and
-                # says so rather than spinning. Found by writing a fake that
-                # did exactly this.
-                print("  stopped: a batch reported units but embedded none.")
+            if not result["done"]:
+                # Forward progress means rows LEFT the pending set. A batch
+                # where every row failed does not: the same rows are selected
+                # again next time and charged again. The first version of this
+                # guard only caught done == 0 AND failed == 0, so a database
+                # whose column rejected every write looped 190 times, paying
+                # for 9,500 embeddings and saving none of them.
+                print(f"  stopped: {result['failed']:,} row(s) in this batch "
+                      "failed and none were saved.")
+                print("  Re-running would select and pay for the same rows again.")
                 break
             done += result["done"]
             failed += result["failed"]
