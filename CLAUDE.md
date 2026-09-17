@@ -54,3 +54,53 @@ When something cannot be verified from here, say so and keep the claim out of th
 deliverable. A document that looks sourced but is not is worse than an open
 question — that judgement is the origin of half the decisions recorded in the
 planning repo.
+
+## Ari's other project: Remmie
+
+Remmie is Ari's separate product — a pre-consultation patient-history tool for
+Australian GP practices. Two repos: `remmie-webdev` (landing site) and the
+product backend. Not part of this project, but its architecture is a candidate
+to borrow from, and Ari has said so explicitly.
+
+**The mechanism, in one line:** the model proposes facts with quotes;
+deterministic code re-verifies every quote against its cited source, blocks
+anything it cannot confirm, and binds each surviving fact to a span in the
+original document. Grounding is enforced outside the model, not self-reported
+by it.
+
+The parts worth knowing when this repo's extraction comes up:
+
+- `GroundedField` — no bare facts. Every value travels with `Evidence`
+  (`doc_id`, `page`, verbatim `quote`).
+- `verify_quote()` — pure Python re-check that the claimed quote is really in
+  the cited document. Exact match, then fuzzy alignment for OCR noise.
+- `_critical_tokens_ok` — the part that matters most here. Fuzziness must not
+  wash out numbers or negation: "3.2 cm" must not match "5.2 cm", and
+  "no tear" must not match "tear".
+- Abstention gate — unverified values are blanked and rendered as "Not stated
+  in the documents supplied". This is *absent is not zero*, applied per fact.
+- Provenance labels over confidence scores — the doctor sees QUOTED /
+  GP_SUPPLIED / DRAFTED / ABSENT / GP_EDITED, never an ML number.
+
+**Where it maps onto senpai-reel.** The schema already has the plumbing and
+none of it is wired: `transcripts.transcript` holds full text,
+`transcript_words` holds word-level timing, and `message_units.source_start` /
+`source_end` are DOUBLE — almost certainly seconds into the video — but
+nothing writes or reads them. Meanwhile `message_units.confidence` is a model
+self-report ("Your extraction confidence 0.0-1.0"), which is exactly what
+Remmie refuses to trust, and the extraction prompt permits "verbatim or
+closely paraphrased", so no claim is guaranteed quotable.
+
+The extraction prompt already warns that creators quote bad advice to argue
+against it, so polarity inversion is a known failure mode here — currently
+defended with a prompt instruction rather than a check. That is the gap
+`_critical_tokens_ok` fills.
+
+**What does not transfer:** the contradiction/red-flag sweep and the HITL gate
+(domain-specific; Ari is n=1 and is himself the human in the loop), and the
+no-opinion policy — marketing copy should extrapolate, so that constraint is
+wrong here.
+
+**Do the measurement before porting anything.** What fraction of the ~5,361
+existing claims actually verify against their transcript is unknown. If most
+verify, none of this is worth building.
